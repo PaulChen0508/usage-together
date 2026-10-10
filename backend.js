@@ -10,7 +10,7 @@ const {spawn, execFile} = require('node:child_process');
 const {promisify} = require('node:util');
 const exec = promisify(execFile);
 const NOW = () => Date.now() / 1000;
-const VERSION='2.3.0';
+const VERSION='2.3.2';
 const INTERVAL = 300;            // usage refresh, seconds
 const TIBO_INTERVAL = 600;       // Tibo check, seconds
 const HOUR = 3600, DAY = 86400;
@@ -331,16 +331,75 @@ function readSessionKey(dataDir){try{const v=fs.readFileSync(sessionKeyFile(data
 
 /* ---------- Tibo (Codex lead at OpenAI) reset announcements ---------- */
 const TIBO_SOURCES=[
+  {type:'rss',name:'X 镜像 · kareem',url:'https://nitter.kareem.one/thsottiaux/rss'},
   {type:'syndication',name:'X',url:'https://syndication.twitter.com/srv/timeline-profile/screen-name/thsottiaux'},
-  {type:'rss',name:'X 镜像',url:'https://nitter.net/thsottiaux/rss'},
-  {type:'rss',name:'X 镜像',url:'https://xcancel.com/thsottiaux/rss'},
-  {type:'rss',name:'X 镜像',url:'https://nitter.poast.org/thsottiaux/rss'},
-  {type:'rss',name:'X 镜像',url:'https://nitter.privacydev.net/thsottiaux/rss'},
 ];
-const TIBO_NEWS={type:'news',name:'新闻',url:'https://news.google.com/rss/search?q=Codex+%22usage+limits%22+OR+%22rate+limits%22+reset+when:1d&hl=en-US&gl=US&ceid=US:en'};
 const RESET_RE=/\b(reset|resets|resetting|refresh(?:ed|ing)?|replenish\w*|top(?:ped|ping)? up)\b|重置|刷新/i;
-const LIMIT_RE=/\b(rate[- ]?limits?|usage[- ]?limits?|limits?|usage|quota|codex)\b|额度|限额|用量/i;
-const isResetPost=p=>RESET_RE.test(p.text) && LIMIT_RE.test(p.text) && (p.kind!=='news' || /codex/i.test(p.text));
+const LIMIT_RE=/\b(rate[- ]?limits?|usage[- ]?limits?|limits?|usage|quota|codex|tokens?|banked)\b|额度|限额|用量|重置券/i;
+const trustedTibo=p=>p.kind!=='news' && String(p.author||'').replace(/^@/,'').toLowerCase()==='thsottiaux'
+  && /^https:\/\/x\.com\/thsottiaux\/status\/\d+$/.test(p.url||'');
+function resetPhase(p){
+  if(!trustedTibo(p))return null;
+  const text=p.text||'';
+  if(!RESET_RE.test(text))return null;
+  if(/\b(?:no|not|never|won't|will not|cannot|can't)\s+(?:\w+\s+){0,3}resets?\b|\bneeds?\s+(?:a\s+)?reset\b|\b(?:can|could|should|would)\s+(?:we|you|someone)\b.{0,30}\breset\b/i.test(text))return null;
+  if(/\breset(?:ting)?\s+(?:the\s+|your\s+|a\s+)?(?:password|context|cache|conversation|branch|repository)\b/i.test(text)
+    && !/\b(?:rate|usage)[- ]?limits?\b/i.test(text))return null;
+  if(!LIMIT_RE.test(text) && !/\bglobal\s+reset\b|^Day\s+\d+\s*\/\s*Reset[.!]?$/i.test(text))return null;
+  if(/\bbanked\b|\b(?:free|bonus|extra)\s+(?:rate limit\s+)?reset\b|\breset\s+credits?\b|重置券/i.test(text))return 'banked';
+  if(/\b(?:have|has|had|already|just)\s+(?:been\s+)?reset\b|\breset\b.{0,30}\b(?:processed|complete[ds]?|done|landed)\b|已(?:经)?重置/i.test(text))return 'completed';
+  if(/\b(?:will|going to|about to|resetting|tomorrow|next|upcoming)\b|\bby\s+(?:EOD|end of|tonight)\b|即将|将会/i.test(text))return 'upcoming';
+  return 'announcement';
+}
+const isResetPost=p=>resetPhase(p)!==null;
+function tiboMessage(a){
+  const title={upcoming:'Tibo：额度即将重置',completed:'Tibo：额度已重置',banked:'Tibo：重置券消息',announcement:'Tibo：额度重置消息'}[a.phase]||'Tibo：额度重置消息';
+  return {title,body:`${a.phase==='upcoming'?'可在重置前使用剩余额度。':''}「${a.text.slice(0,180)}」`};
+}
+function activeTiboAlert(tibo,n=NOW()){
+  if(tibo?.pendingReset)return {...tibo.pendingReset,persistent:true};
+  const a=tibo?.alert;return a && a.at<=n+600 && n-a.at<(a.window||DAY)?a:null;
+}
+function weeklyObservation(p,n=NOW()){
+  if(!p || p.error || !Number.isFinite(p.fetchedAt) || n-p.fetchedAt>600 || p.fetchedAt>n+600)return null;
+  const w=summarize('gpt',p).weekly;
+  if(!w || !Number.isFinite(w.used))return null;
+  return {id:w.id,used:w.used,resetsAt:w.resetsAt,fetchedAt:p.fetchedAt};
+}
+function weeklyWasReset(before,after){
+  if(!before || !after || before.id!==after.id || after.fetchedAt<=before.fetchedAt)return false;
+  // A new weekly period, zeroed usage, or a substantial weekly replenishment.
+  // The five-hour window is deliberately never consulted.
+  return (Number.isFinite(before.resetsAt) && Number.isFinite(after.resetsAt) && after.resetsAt>before.resetsAt+60)
+    || (before.used>0 && after.used===0) || before.used-after.used>=5;
+}
+function observeWeeklyReset(tibo,gpt,n=NOW()){
+  const pending=tibo.pendingReset,latest=weeklyObservation(gpt,n);
+  if(!pending || !latest)return false;
+  if(!pending.weeklyBefore || pending.weeklyBefore.id!==latest.id){pending.weeklyBefore=latest;return false;}
+  if(!weeklyWasReset(pending.weeklyBefore,latest)){
+    // Usage can rise while the warning is held; retain the newest pre-reset observation.
+    if(latest.fetchedAt>pending.weeklyBefore.fetchedAt)pending.weeklyBefore=latest;
+    return false;
+  }
+  tibo.resolvedThroughAt=Math.max(tibo.resolvedThroughAt||0,latest.fetchedAt);
+  tibo.resolvedReset={id:pending.id,at:n,weeklyAfter:latest};
+  tibo.pendingReset=null;
+  if(['upcoming','announcement'].includes(tibo.alert?.phase))tibo.alert=null;
+  return true;
+}
+function latchResetPost(tibo,hit,gpt,n=NOW()){
+  if(!hit || !['upcoming','announcement'].includes(hit.phase) || hit.at<=(tibo.resolvedThroughAt||0))return;
+  if(tibo.pendingReset){
+    if(hit.at>tibo.pendingReset.at)tibo.pendingReset={...tibo.pendingReset,...hit,text:hit.text.slice(0,400)};
+    return;
+  }
+  tibo.pendingReset={...hit,text:hit.text.slice(0,400),firstDetectedAt:n,weeklyBefore:weeklyObservation(gpt,n)};
+}
+function selectTiboPost(posts,n=NOW()){
+  return posts.map(p=>({...p,phase:resetPhase(p)})).filter(p=>p.phase && p.at && p.at<=n+600 && n-p.at<(p.window||DAY))
+    .sort((a,b)=>b.at-a.at)[0]||null;
+}
 function decode(s){return String(s||'').replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g,'$1').replace(/<[^>]+>/g,' ')
   .replace(/&#x([0-9a-f]+);/gi,(_,h)=>String.fromCodePoint(parseInt(h,16))).replace(/&#(\d+);/g,(_,d)=>String.fromCodePoint(+d))
   .replace(/&quot;/g,'"').replace(/&#39;|&apos;/g,"'").replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&nbsp;/g,' ').replace(/&amp;/g,'&')
@@ -350,9 +409,12 @@ function parseRss(xml,src){
   return [...String(xml).matchAll(/<item>([\s\S]*?)<\/item>/gi)].map(m=>{
     const item=m[1];let link=decode(tag(item,'link'));
     if(src.type!=='news')link=link.replace(/^https?:\/\/[^/]+/,'https://x.com').replace(/#m$/,'');
-    const title=decode(tag(item,'title')),desc=decode(tag(item,'description'));
+    const title=decode(tag(item,'title'));
+    // A quoted older post must not make an unrelated new post look like a new reset.
+    const desc=decode(tag(item,'description').replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g,'$1').split(/<hr\s*\/?\s*>|<blockquote\b/i)[0]);
     return {id:(link.match(/status\/(\d+)/)||[])[1]||crypto.createHash('sha1').update(link||title).digest('hex').slice(0,16),
-      text:src.type==='news'?title:(desc.length>title.length?desc:title),at:epoch(decode(tag(item,'pubDate'))),url:/^https:\/\//.test(link)?link:null,
+      text:src.type==='news'?title:(desc||title.replace(/^R to @[^:]+:\s*/i,'')),author:decode(tag(item,'dc:creator')),
+      at:epoch(decode(tag(item,'pubDate'))),url:/^https:\/\//.test(link)?link:null,
       kind:src.type,sourceName:src.name,window:src.type==='news'?12*HOUR:DAY};
   }).filter(p=>p.text && p.at);
 }
@@ -362,21 +424,22 @@ function parseSyndication(html,src){
   const out=[],queue=[data];
   for(let i=0;i<queue.length && i<20000;i++){const o=queue[i];if(!o || typeof o!=='object')continue;
     if(o.id_str && (o.full_text || o.text) && o.created_at)out.push({id:o.id_str,text:decode(o.full_text||o.text),at:epoch(o.created_at),
-      url:`https://x.com/thsottiaux/status/${o.id_str}`,kind:'tweet',sourceName:src.name,window:DAY});
+      author:o.user?.screen_name||null,url:`https://x.com/${o.user?.screen_name||'unknown'}/status/${o.id_str}`,kind:'tweet',sourceName:src.name,window:DAY});
     else for(const v of Object.values(o))if(v && typeof v==='object')queue.push(v);}
   return out.filter(p=>p.at);
 }
-async function fetchTiboPosts(){
-  const posts=[];let source=null;
+async function fetchTiboPosts({requestFn=request,sources=TIBO_SOURCES}={}){
+  const failures=[];
   const headers={'User-Agent':UA,Accept:'text/html,application/rss+xml,application/xml;q=0.9,*/*;q=0.8','Accept-Language':'en-US,en;q=0.9'};
-  for(const src of TIBO_SOURCES){
-    try{const r=await request(src.url,{headers,timeout:15});if(r.status!==200)continue;
+  for(const src of sources){
+    try{const r=await requestFn(src.url,{headers,timeout:12});if(r.status!==200){failures.push(`${src.name}: HTTP ${r.status}`);continue;}
       const list=src.type==='rss'?parseRss(r.body,src):parseSyndication(r.body,src);
-      if(list.length){posts.push(...list);source=src.name;break;}}catch{}
+      const posts=list.filter(trustedTibo);
+      if(posts.length)return {posts,source:src.name,latestPostAt:Math.max(...posts.map(p=>p.at))};
+      failures.push(`${src.name}: 未读到有效原帖`);
+    }catch{failures.push(`${src.name}: 连接失败`);}
   }
-  try{const r=await request(TIBO_NEWS.url,{headers,timeout:15});if(r.status===200){const list=parseRss(r.body,TIBO_NEWS);posts.push(...list);source=source||(list.length||/<rss/i.test(r.body)?'新闻':null);}}catch{}
-  if(!source)throw new Error('unreachable');
-  return {posts,source};
+  throw new Error(failures.join('；')||'没有可用的原帖来源');
 }
 
 /* ---------- views shared by the window and the menu bar ---------- */
@@ -405,14 +468,20 @@ function demoState(){const n=NOW();return {gpt:{fetchedAt:n,windows:[
 async function startServer(options={}) {
   const demo=options.demo || process.argv.includes('--demo');
   const dataDir=process.env.USAGE_DATA_DIR || path.join(os.homedir(),'Library/Application Support/Usage Together');
-  const cacheFile=path.join(dataDir,'usage.json'),reminderFile=path.join(dataDir,'reminders.json');
+  const cacheFile=path.join(dataDir,'usage.json'),reminderFile=path.join(dataDir,'reminders.json'),tiboFile=path.join(dataDir,'tibo.json');
   let state={gpt:{windows:[]},claude:{windows:[]}};
   if(demo)state=demoState();else try{const cached=JSON.parse(fs.readFileSync(cacheFile,'utf8'));for(const p of ['gpt','claude'])if(cached[p]?.windows)state[p]=cached[p];}catch{}
   let reminders={credit:{},tiboNotified:[],tiboDismissed:[]};
   try{reminders={...reminders,...JSON.parse(fs.readFileSync(reminderFile,'utf8'))};}catch{}
   const notifications=[];
   let tibo=demo?{checkedAt:NOW(),ok:true,source:'X',alert:{id:'demo',text:'We are resetting Codex rate limits for all paid plans in the next hour. Enjoy!',at:NOW()-1800,url:'https://x.com/thsottiaux',sourceName:'X'}}
-    :{checkedAt:null,ok:null,source:null,alert:null};
+    :{checkedAt:null,lastSuccessAt:null,latestPostAt:null,ok:null,source:null,alert:null};
+  if(demo)latchResetPost(tibo,{...tibo.alert,phase:'upcoming'},state.gpt);
+  if(!demo)try{const cached=JSON.parse(fs.readFileSync(tiboFile,'utf8'));tibo={...tibo,...cached,ok:null};
+    // Migrate the previous release's current warning, including an acknowledged one.
+    if(!Object.hasOwn(cached,'pendingReset'))latchResetPost(tibo,activeTiboAlert(tibo),state.gpt);
+    if(!tibo.pendingReset)tibo.alert=activeTiboAlert(tibo);
+  }catch{}
   let tiboBusy=false,tiboLast=0;
   const busy=new Set(),last=new Map(),retry=new Map();let stopping=false;
   function writeJSON(file,value){if(demo)return;try{fs.mkdirSync(dataDir,{recursive:true,mode:0o700});
@@ -430,35 +499,42 @@ async function startServer(options={}) {
         body:`${name} 有 ${list.length} 张重置券将在 ${left(list[0].expiresAt-n)} 后到期（${when(list[0].expiresAt)}），记得及时用掉。`});
     }
     for(const [k,v] of Object.entries(reminders.credit))if(!v || v.exp<n-DAY){delete reminders.credit[k];changed=true;}
-    const a=tibo.alert;
-    if(a && !reminders.tiboNotified.includes(a.id) && !reminders.tiboDismissed.includes(a.id)){
+    const a=activeTiboAlert(tibo,n);
+    if(a && !reminders.tiboNotified.includes(a.id) && (a.persistent || !reminders.tiboDismissed.includes(a.id))){
       reminders.tiboNotified=[...reminders.tiboNotified,a.id].slice(-50);changed=true;
-      notify({title:'⚠️ Codex 额度要重置了',subtitle:'Tibo 刚发了消息',body:`抓紧把 token 用完！「${a.text.slice(0,120)}」`});
+      notify({...tiboMessage(a),subtitle:'Tibo 的 X 动态'});
     }
     if(changed)saveReminders();
   }
   async function update(provider,force=false) {
     const n=NOW();if(stopping || demo || busy.has(provider) || n<(retry.get(provider)||0) || n-(last.get(provider)||0)<(force?30:INTERVAL))return;
     busy.add(provider);last.set(provider,n);
-    try{const fresh=await (provider==='gpt'?fetchCodex():fetchClaude(dataDir));state[provider]={...fresh,error:null};retry.delete(provider);}
+    try{const fresh=await (provider==='gpt'?(options.fetchCodex||fetchCodex)():fetchClaude(dataDir));state[provider]={...fresh,error:null};retry.delete(provider);}
     catch(error){state[provider]={...state[provider],error:provider==='gpt'?friendlyCodexError(error):error.message,errorAt:NOW()};
       if(error.retryAfter)retry.set(provider,NOW()+error.retryAfter);}
-    finally{busy.delete(provider);save();checkReminders();}
+    finally{busy.delete(provider);save();if(provider==='gpt' && tibo.pendingReset){observeWeeklyReset(tibo,state.gpt);writeJSON(tiboFile,tibo);}checkReminders();}
   }
   async function checkTibo(force=false){
     const n=NOW();if(demo || stopping || tiboBusy || n-tiboLast<(force?60:TIBO_INTERVAL))return;
     tiboBusy=true;tiboLast=n;
-    try{const {posts,source}=await fetchTiboPosts();
-      const hit=posts.filter(p=>n-p.at<=p.window && p.at<=n+600 && isResetPost(p)).sort((a,b)=>b.at-a.at)[0] || null;
-      tibo={checkedAt:n,ok:true,source,alert:hit?{id:hit.id,text:hit.text.slice(0,400),at:hit.at,url:hit.url,sourceName:hit.sourceName}:null};
-    }catch{tibo={...tibo,checkedAt:n,ok:false,alert:tibo.alert && n-tibo.alert.at<=DAY?tibo.alert:null};}
-    finally{tiboBusy=false;checkReminders();}
+    try{const {posts,source,latestPostAt}=await (options.fetchTiboPosts||fetchTiboPosts)();
+      const hit=selectTiboPost(posts,NOW());
+      const previous=tibo.alert && activeTiboAlert({alert:tibo.alert});
+      const latest=hit && (!previous || hit.at>=previous.at)?hit:previous;
+      tibo={...tibo,checkedAt:NOW(),lastSuccessAt:NOW(),latestPostAt,ok:true,source,error:null,
+        alert:latest?{id:latest.id,text:latest.text.slice(0,400),at:latest.at,url:latest.url,sourceName:latest.sourceName,phase:latest.phase,window:latest.window}:null};
+      latchResetPost(tibo,hit,state.gpt);
+      observeWeeklyReset(tibo,state.gpt);
+      if(!tibo.pendingReset && ['upcoming','announcement'].includes(tibo.alert?.phase))tibo.alert=null;
+    }catch(e){tibo={...tibo,checkedAt:NOW(),ok:false,error:e.message,alert:activeTiboAlert(tibo)};}
+    finally{tiboBusy=false;writeJSON(tiboFile,tibo);checkReminders();}
   }
   function refresh(force=false){checkTibo(force);return Promise.allSettled(['gpt','claude'].map(p=>update(p,force)));}
   const view=id=>({...state[id],summary:summarize(id,state[id])});
   function alerts(){
     const out=[];const n=NOW();
-    if(tibo.alert && !reminders.tiboDismissed.includes(tibo.alert.id))out.push({kind:'tibo',...tibo.alert});
+    const a=activeTiboAlert(tibo,n);
+    if(a && (a.persistent || !reminders.tiboDismissed.includes(a.id)))out.push({kind:'tibo',...a,warning:!!a.persistent,title:tiboMessage(a).title});
     for(const id of ['gpt','claude']){const list=expiringCredits(state[id],n);
       if(list.length)out.push({kind:'credit',provider:id,count:list.length,expiresAt:list[0].expiresAt});}
     return out;
@@ -480,10 +556,12 @@ async function startServer(options={}) {
     res.setHeader('Content-Security-Policy',"default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; font-src 'self'; frame-ancestors 'none'; base-uri 'none'");
     function json(value){res.setHeader('Content-Type','application/json');res.end(JSON.stringify(value));}
     if(req.method==='GET' && route==='state'){json({gpt:view('gpt'),claude:view('claude'),demo,refreshing:[...busy],serverTime:NOW(),nativeStatus,
-      alerts:alerts(),tibo:{checkedAt:tibo.checkedAt,ok:tibo.ok,source:tibo.source},hasSessionKey:!!readSessionKey(dataDir),theme:readTheme(dataDir),version:VERSION});return;}
+      alerts:alerts(),tibo:{checkedAt:tibo.checkedAt,lastSuccessAt:tibo.lastSuccessAt,latestPostAt:tibo.latestPostAt,
+        ok:tibo.ok,source:tibo.source,error:tibo.error,checking:tiboBusy},hasSessionKey:!!readSessionKey(dataDir),theme:readTheme(dataDir),version:VERSION});return;}
     if(req.method==='POST' && /^host\/(show|hide|compact|expand)\/[01]$/.test(route)){const parts=route.split('/');nativeStatus.visible=parts[2]==='1';if(parts[1]==='compact' || parts[1]==='expand')nativeStatus.compact=parts[1]==='compact';nativeStatus.events.push({action:parts[1],visible:nativeStatus.visible,at:NOW()});nativeStatus.events=nativeStatus.events.slice(-20);json({ok:true});return;}
     if(req.method==='POST' && route==='refresh'){refresh(true);json({ok:true});return;}
     if(req.method==='POST' && /^tibo\/dismiss\/[\w:.-]{1,80}$/.test(route)){const id=route.split('/')[2];
+      if(tibo.pendingReset?.id===id){json({ok:true,persistent:true});return;}
       reminders.tiboDismissed=[...reminders.tiboDismissed.filter(x=>x!==id),id].slice(-50);saveReminders();json({ok:true});return;}
     if(req.method==='POST' && /^config\/theme\/(dark|light)$/.test(route)){
       try{fs.mkdirSync(dataDir,{recursive:true,mode:0o700});fs.writeFileSync(path.join(dataDir,'theme.txt'),route.split('/')[2],{mode:0o600});}catch{}
@@ -509,7 +587,7 @@ async function startServer(options={}) {
   const stop=()=>{stopping=true;clearInterval(timer);stopChildren();server.close();};
   if(options.autoRefresh!==false)refresh(true);
   if(demo)checkReminders();
-  return {url,state,refresh,server,stop};
+  return {url,state,refresh,update,checkTibo,server,stop};
 }
 function friendlyCodexError(error){const s=String(error.message || '');
   if(/auth|login|sign.?in|credential|unauthor|401|not logged/i.test(s))return 'Codex 尚未登录或登录已过期。请在 ChatGPT/Codex 中登录，然后刷新。';
@@ -520,7 +598,8 @@ function friendlyCodexError(error){const s=String(error.message || '');
   return 'Codex 用量查询失败。请检查网络和登录状态，并确认使用的是订阅账户。';
 }
 module.exports={percent,epoch,duration,normalizeCodex,normalizeClaude,extractToken,extractOAuth,RPC,fetchCodex,fetchClaude,startServer,demoState,
-  summarize,expiringCredits,parseRss,parseSyndication,isResetPost,decryptCookie,claudeCredits};
+  summarize,expiringCredits,parseRss,parseSyndication,isResetPost,resetPhase,selectTiboPost,activeTiboAlert,tiboMessage,fetchTiboPosts,
+  weeklyObservation,weeklyWasReset,observeWeeklyReset,latchResetPost,decryptCookie,claudeCredits};
 if(require.main===module){
 let application;
 const closeApplication=()=>{

@@ -174,11 +174,11 @@ ObjC.registerSubclass({name:'UsageTogetherController',superclass:'NSObject',prot
      failures=0;
      const snapshot=JSON.parse(text);
      const alerts=snapshot.alerts||[];
-     const tibo=alerts.some(a=>a.kind==='tibo'), credit=alerts.some(a=>a.kind==='credit');
+     const tibo=alerts.some(a=>a.kind==='tibo' && a.warning!==false), credit=alerts.some(a=>a.kind==='credit');
      const title=(tibo||credit?'⚠︎':'')+'G'+fiveHour(snapshot.state.gpt)+' C'+fiveHour(snapshot.state.claude);
      if(title!==lastTitle){status.button.title=title;lastTitle=title;}
      let tip='5 小时剩余额度：G = GPT，C = Claude（* 表示旧数据）\n单击：菜单　双击：打开窗口';
-     if(tibo)tip+='\n⚠︎ Tibo 说 Codex 额度要重置了，抓紧用完 token！';
+     if(tibo)tip+='\n⚠︎ '+String(alerts.find(a=>a.kind==='tibo' && a.warning!==false).title||'Tibo 发布了额度重置消息')+'（保留至每周额度重置）';
      if(credit)tip+='\n⏰ 有重置券 3 天内到期';
      if(tip!==lastTip){status.button.toolTip=tip;lastTip=tip;}
      (snapshot.notifications||[]).forEach(notify);

@@ -26,6 +26,7 @@ header{display:flex;align-items:center;gap:5px;margin-bottom:5px}
 .alert.credit .alert-icon{color:var(--warn)}
 .alert-body{min-width:0;flex:1}
 .alert-body b{font-size:10.5px;display:block;line-height:1.35}
+.alert-text{font-size:10px;line-height:1.4;margin:3px 0;overflow-wrap:anywhere}
 .alert-actions{display:flex;align-items:center;gap:4px;margin-top:3px;font-size:10px;color:var(--muted)}
 .alert-actions span:first-child{margin-right:auto}
 .alert-actions button{font-size:10px;padding:1px 6px;border:1px solid var(--line);background:var(--card)}
@@ -81,6 +82,7 @@ header{display:flex;align-items:center;gap:5px;margin-bottom:5px}
 #keyForm button{border:1px solid var(--line);background:var(--soft);font-size:10px}
 .key-msg:empty{display:none}
 .foot{display:flex;justify-content:space-between;margin:5px 1px 0;font-size:9px;color:var(--muted)}
+#tibo.bad{color:var(--warn)}
 .loading{grid-column:1/-1;text-align:center;padding:24px 0;color:var(--muted)}
 .demo .mark{color:#b57f26}
 

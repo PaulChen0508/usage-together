@@ -38,3 +38,13 @@ _to_delete/
 claude-session-key
 reminders.json
 theme.txt
+tibo.json
+
+# Runtime account/cookie stores and local audit artifacts
+Cookies
+Cookies-*
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+work/

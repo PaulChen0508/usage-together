@@ -47,7 +47,7 @@ function card(id,p){const isGPT=id==='gpt',s=p.summary||{},old=isOld(p),busy=sta
   ${more(id,p,s.others||[])}
  </section>`;}
 function alertsHTML(list){return list.map(a=>a.kind==='tibo'
- ?`<div class="alert tibo" role="alert" title="${esc(a.text)}"><span class="alert-icon" aria-hidden="true">⚠︎</span><div class="alert-body"><b>Tibo 说 Codex 要重置额度了，抓紧用完 token！</b><div class="alert-actions"><span>${esc(short(a.at))}</span>${a.url?`<button data-open="${esc(a.url)}">原帖</button>`:''}<button data-dismiss="${esc(a.id)}">知道了</button></div></div></div>`
+ ?`<div class="alert tibo" role="alert" title="${esc(a.text)}"><span class="alert-icon" aria-hidden="true">${a.warning===false?'ℹ':'⚠︎'}</span><div class="alert-body"><b>${esc(a.title||'Tibo：额度重置消息')}</b><p class="alert-text">${esc(a.text)}</p>${a.persistent?'<p class="alert-text">警告保留至 GPT 每周额度实际重置。</p>':a.phase==='upcoming'?'<p class="alert-text">可在重置前使用剩余额度。</p>':''}<div class="alert-actions"><span>${esc(short(a.at))}</span>${a.url?`<button data-open="${esc(a.url)}">原帖</button>`:''}${a.persistent?'<span>持续提醒</span>':`<button data-dismiss="${esc(a.id)}">知道了</button>`}</div></div></div>`
  :`<div class="alert credit" role="alert"><span class="alert-icon" aria-hidden="true">⏰</span><div class="alert-body"><b>${a.provider==='gpt'?'GPT':'Claude'} 有 ${a.count} 张重置券快到期</b><div class="alert-actions"><span>还剩 <span class="countdown" data-reset="${a.expiresAt}">${esc(countdown(a.expiresAt))}</span>（${esc(short(a.expiresAt))}）</span></div></div></div>`).join('');}
 function clocks(){document.querySelectorAll('[data-reset]').forEach(el=>{const t=Number(el.dataset.reset);if(t)el.textContent=countdown(t);});}
 function fit(){const h=host();if(!h)return;let height=Math.ceil(document.body.getBoundingClientRect().height);
@@ -66,7 +66,11 @@ async function load(){try{const r=await fetch('state');if(!r.ok)throw Error();co
  applyTheme(s.theme||'dark');
  $('refresh').disabled=state.refreshing.length>0;
  $('status').textContent=state.refreshing.length?'同步中…':'每 5 分钟更新';document.querySelector('header .mark').title=$('status').textContent;
- const t=s.tibo||{};$('tibo').textContent=t.ok===false?'Tibo 动态暂时读不到，会自动重试':t.checkedAt?`Tibo 动态 ${short(t.checkedAt).slice(6)} 已查`:'Tibo 动态检查中…';
+ const t=s.tibo||{},el=$('tibo');
+ el.textContent=t.checking?'Tibo 原帖检查中…':t.ok===false?'Tibo 原帖读不到 · 自动重试':t.ok===true?`Tibo 原帖 ${short(t.lastSuccessAt||t.checkedAt).slice(6)} 已查`:'Tibo 原帖待检查';
+ el.classList.toggle('bad',t.ok===false);
+ el.title=t.ok===false?`未能读取 Tibo 原帖，无法确认是否有新重置消息。${t.lastSuccessAt?'上次成功：'+short(t.lastSuccessAt)+'。':''}${t.error||''}`:
+  `${t.source?'来源：'+t.source+'。':''}${t.latestPostAt?'最新原帖：'+short(t.latestPostAt)+'。':''}每 10 分钟检查；来源可能有缓存延迟。`;
  clocks();fit();
  }catch{$('status').textContent='本地连接中断，请重新打开应用';}}
 function applyTheme(t){if(t===theme)return;theme=t;document.body.classList.toggle('light',t==='light');

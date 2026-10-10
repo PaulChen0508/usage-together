@@ -1,6 +1,6 @@
 {
   "name": "usage-together",
-  "version": "2.3.0",
+  "version": "2.3.2",
   "description": "macOS menu-bar app showing remaining Codex/ChatGPT and Claude Code usage limits side by side.",
   "private": true,
   "license": "MIT",
@@ -9,7 +9,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "test": "node --test test.js",
+    "test": "node --test test.js tibo.test.js",
     "preview": "node backend.js --demo",
     "build": "sh build.sh \"$PWD/dist/Usage Together.app\" \"$(command -v node)\""
   }
