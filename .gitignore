@@ -33,3 +33,8 @@ id_ed25519*
 usage.json.tmp
 *.tmp
 _to_delete/
+
+# 用量伴侣在本机保存的文件（以防被复制进项目）
+claude-session-key
+reminders.json
+theme.txt
