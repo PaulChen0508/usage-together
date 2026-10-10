@@ -1,0 +1,34 @@
+# macOS
+.DS_Store
+._*
+__MACOSX/
+
+# 构建产物（应用包里含 Node 运行时，体积大，不放进仓库）
+*.app/
+*.zip
+build/
+dist/
+
+# 本地数据与日志（不应上传）
+usage.json
+*.log
+.env
+.env.*
+node_modules/
+
+# 密钥和凭据（以防万一）
+*.pem
+*.key
+*.p12
+*credentials*
+*secret*
+*token*
+.claude/
+.codex/
+auth.json
+id_rsa*
+id_ed25519*
+*.pfx
+.npmrc
+usage.json.tmp
+*.tmp

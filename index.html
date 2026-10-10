@@ -1,0 +1,10 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Usage Together · 用量伴侣</title><link rel="stylesheet" href="style.css"><script defer src="ui.js"></script></head>
+<body><section id="closedView" hidden><span class="mark" aria-hidden="true">◒</span><h2 id="closedTitle">窗口已隐藏</h2><p id="closedText">后台仍会更新账户额度。</p><button id="restore">重新显示</button></section><main>
+<header><div class="identity"><span class="mark" aria-hidden="true">◒</span><div><h1>Usage Together</h1><p>用量伴侣 <span>GPT + Claude</span></p></div></div><div class="tools"><button id="compact" title="切换紧凑视图" aria-label="切换紧凑视图" aria-pressed="false">紧凑视图</button><button id="hide" title="隐藏到菜单栏" aria-label="隐藏到菜单栏">隐藏</button></div></header>
+<div class="intro"><span class="dot"></span><span id="mode">账户额度，一目了然</span><button id="help" aria-label="查看说明">使用说明 ↗</button></div>
+<div id="providers" aria-live="polite"><div class="loading">正在读取账户额度…</div></div>
+<footer><div><span id="status">每 5 分钟自动更新</span><small>重置时间按本机时区显示</small></div><button class="refresh" id="refresh"><span aria-hidden="true">↻</span> 刷新</button></footer>
+</main>
+<dialog id="helpDialog"><div class="dialog-head"><h2>关于用量伴侣 · 2.0.2</h2><button id="closeHelp" aria-label="关闭说明">×</button></div><p>GPT 数据来自本机已登录的 Codex / ChatGPT Work 账户，模型列表会自动更新，包括账户可用的 GPT-6.1 Sol。</p><p>这里展示的是账户返回的额度分组。多个模型可能共享同一份额度；普通 ChatGPT 对话和 OpenAI API 账单用量不在此范围内。</p><p>Claude 数据来自已登录的 Claude Code。首次读取钥匙串可能出现系统授权提示；登录过期时请重新登录，再点刷新。</p><p>剩余额度 = 100% − 已用额度。它是额度比例，无法换算成固定的聊天次数。没有数据时显示「—」，并保留旧数据的时间。</p><p>两边都每 5 分钟自动查询。Claude 的 /usage 接口未公开文档化，服务更新可能影响读取。程序只读用量，不发送聊天，不消耗重置券。</p><p class="help-note">拖动窗口标题栏调整位置。× 隐藏窗口，菜单栏可以重新打开；菜单栏「退出」结束程序。</p><div class="dialog-actions"><button id="quitApp">退出程序</button><button class="dialog-done" id="doneHelp">知道了</button></div></dialog>
+</body></html>
