@@ -1,42 +1,79 @@
 'use strict';
 const $=id=>document.getElementById(id);
 const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const pct=v=>v===null || v===undefined?'—':Number(v).toLocaleString('zh-CN',{maximumFractionDigits:1})+'%';
-const date=v=>v?new Date(v*1000).toLocaleString('zh-CN',{year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}):'时间未知';
-function countdown(t){if(!t)return '时间未知';const s=Math.ceil(t-Date.now()/1000);if(s<=0)return '已到重置时间 · 待刷新确认';
+const pct=v=>v===null || v===undefined?'—':Math.round(v)+'%';
+const short=v=>v?new Date(v*1000).toLocaleString('zh-CN',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}):'时间未知';
+function countdown(t){if(!t)return '时间未知';const s=Math.ceil(t-Date.now()/1000);if(s<=0)return '已到时间 · 待刷新确认';
  const days=Math.floor(s/86400),hours=Math.floor(s%86400/3600),mins=Math.floor(s%3600/60);
  if(days)return `${days} 天 ${hours} 小时`;
  if(hours)return `${hours} 小时 ${mins} 分`;
  return mins>0?`${mins} 分 ${s%60} 秒`:`${s} 秒`;
 }
-let state=null,signature='',compact=false;
+const host=()=>window.webkit?.messageHandlers?.usageTogether;
+let theme='',state=null,signature='',alertSig='',lastFit=0;
 function isOld(p){return !!p.error || !p.fetchedAt || Date.now()/1000-p.fetchedAt>600 || (p.windows||[]).some(w=>w.resetsAt && w.resetsAt<Date.now()/1000);}
-function card(id,p){const isGPT=id==='gpt',windows=p.windows||[],available=windows.filter(w=>typeof w.remaining==='number');
- const limiting=available.reduce((a,w)=>!a || w.remaining<a.remaining?w:a,null);
- const remaining=limiting?.remaining??null;
- const resets=windows.filter(w=>w.resetsAt).sort((a,b)=>a.resetsAt-b.resetsAt);
- const next=resets[0];const old=isOld(p),busy=state.refreshing.includes(id);
- const accent=remaining!==null && remaining<=5?'#cb6559':remaining!==null && remaining<=20?'#c79947':null;
- const defaultModel=(p.models||[]).find(m=>m.isDefault);
- const plan=p.plan?.toUpperCase();
- const main = `<div class="hero"><div class="ring" style="--amount:${remaining??0};${accent?'--ringcolor:'+accent:''}"><div class="ring-inner"><strong>${remaining===null?'—':esc(Number(remaining).toLocaleString('zh-CN',{maximumFractionDigits:1}))}${remaining===null?'':'<em>%</em>'}</strong><span>${old && p.fetchedAt?'上次剩余':'剩余额度'}</span></div></div><div class="hero-copy"><p class="eyebrow">${next?'最近一次额度重置':'等待账户数据'}</p><h3 class="countdown" data-reset="${next?.resetsAt||''}">${next?esc(countdown(next.resetsAt)):'—'}</h3><p class="sub">${next?esc(date(next.resetsAt))+' 重置 · '+esc(next.label):'登录后即可查看用量和重置时间'}</p><div class="bucket">${limiting?esc(limiting.label+' · '+limiting.group)+' 剩余最少':isGPT?'Codex / ChatGPT Work':'Claude Code'}</div></div></div>`;
- const rows=windows.map(w=>`<div class="window"><div class="window-top"><span class="window-title">${esc(w.label)}${isGPT && windows.some(x=>x.bucket!==w.bucket)?' · '+esc(w.group):''}</span><span class="values">已用 <b>${pct(w.used)}</b> <span> / 剩余 ${pct(w.remaining)}</span></span></div><div class="bar" role="progressbar" aria-label="${esc(w.label)}已用额度" ${w.used!==null?'aria-valuenow="'+w.used+'"':''} aria-valuemin="0" aria-valuemax="100"><span style="width:${w.used??0}%;${w.used>=95?'background:#cb6559':w.used>=80?'background:#c79947':''}"></span></div><div class="window-date"><span>${w.resetsAt?esc(date(w.resetsAt))+' 重置':'重置时间未提供'}</span><span class="countdown" data-reset="${w.resetsAt||''}">${w.resetsAt?esc(countdown(w.resetsAt)):'—'}</span></div></div>`).join('');
- const models=isGPT?`<details><summary>可用模型 ${(p.models||[]).length?'· '+p.models.length+' 个':''}</summary><div class="models">${(p.models||[]).map(m=>`<span class="${m.id==='gpt-6.1-sol'?'latest':''}">${esc(m.name)}${m.isDefault?' · 默认':''}</span>`).join('')||'本机尚未提供模型列表'}</div><p class="models-note">模型自动从账户读取；以上额度为服务提供的分组，多个模型可能共享额度。</p>${p.note?'<p class="models-note">'+esc(p.note)+'</p>':''}</details>`:'';
- const credits=isGPT && p.resetCredits && typeof p.resetCredits.availableCount==='number'?`<div class="credits">Full reset 重置券 <b>${p.resetCredits.availableCount}</b> 张${(()=>{const expiry=(p.resetCredits.credits||[]).filter(c=>c.status==='available' && c.expiresAt).sort((a,b)=>a.expiresAt-b.expiresAt)[0];return expiry?' · 最早 '+esc(date(expiry.expiresAt))+' 到期':'';})()}</div>`:'';
- return `<section class="provider ${id}"><div class="provider-head"><span class="provider-icon" aria-hidden="true">${isGPT?'G':'✳'}</span><h2>${isGPT?'GPT':'Claude'}<small>${isGPT?'Codex / Work':'Code'}</small></h2><span class="badge" title="${esc(defaultModel?.name||'')}">${isGPT?esc(plan || '账户额度'):'账户额度'}</span></div>${isGPT && defaultModel?'<p class="model-caption">可用模型 · <b>'+esc(defaultModel.name)+'</b></p>':''}${main}${p.error?'<p class="error">'+esc(p.error)+'</p>':''}<div class="window-list">${rows || '<p class="unknown">'+(busy?'正在读取用量…':p.fetchedAt?'账户未提供固定额度窗口':'账户暂未返回额度窗口')+'</p>'}</div>${credits}${models}<div class="data-foot"><span class="health ${old && p.fetchedAt?'old':''}"><i></i>${busy?'更新中…':p.error?'读取失败'+(p.fetchedAt?' · 保留旧数据':''):old && p.fetchedAt?'数据待更新':p.fetchedAt?'已同步':'尚未连接'}</span><span>${p.fetchedAt?'更新于 '+esc(date(p.fetchedAt)):'未取得数据'}</span></div></section>`;
-}
+const tone=r=>r===null || r===undefined?'':r<=5?'bad':r<=20?'warn':'';
+const usable=c=>!c.status || /avail|active|unused|valid/i.test(String(c.status));
+
+// One small card per provider: big 5-hour number, then 5-hour reset, weekly, reset credits.
+function when5(w){
+ if(w?.resetsAt)return `<span class="countdown" data-reset="${w.resetsAt}">${esc(countdown(w.resetsAt))}</span><span class="at">${esc(short(w.resetsAt))} 刷新</span>`;
+ if(w && (w.used===0 || w.remaining===100))return `<span class="countdown idle">还没开始计时</span><span class="at">发第一条消息后开始</span>`;
+ return '<span class="at">刷新时间未提供</span>';}
+function weekly(w){
+ if(!w)return '<div class="week"><div class="week-top"><span>每周</span><span class="at">未返回</span></div></div>';
+ const r=w.remaining;
+ const t=w.resetsAt?`<span class="countdown" data-reset="${w.resetsAt}">${esc(countdown(w.resetsAt))}</span><span class="at">${esc(short(w.resetsAt))} 刷新</span>`:(w.used===0?'<span class="at">还没用过</span>':'<span class="at">时间未知</span>');
+ return `<div class="week"><div class="week-top"><span>每周剩余</span><b class="${tone(r)}">${pct(r)}</b></div><div class="bar ${tone(r)}" role="progressbar" aria-label="每周剩余额度" aria-valuenow="${r??0}" aria-valuemin="0" aria-valuemax="100"><span style="width:${r??0}%"></span></div><div class="week-when">${t}</div></div>`;}
+function credits(p){const rc=p.resetCredits;if(!rc || typeof rc.availableCount!=='number')return '';
+ const first=(rc.credits||[]).filter(c=>usable(c) && c.expiresAt && c.expiresAt>Date.now()/1000).sort((a,b)=>a.expiresAt-b.expiresAt)[0];
+ const soon=first && first.expiresAt-Date.now()/1000<=3*86400;
+ return `<div class="credits ${soon?'soon':''}" title="${first?'最早 '+esc(short(first.expiresAt))+' 到期':''}">重置券 <b>${rc.availableCount}</b>${first?` · ${soon?'<span class="countdown" data-reset="'+first.expiresAt+'">'+esc(countdown(first.expiresAt))+'</span>后到期':esc(short(first.expiresAt).slice(0,5))+' 到期'}`:''}</div>`;}
+function more(id,p,list){
+ const isGPT=id==='gpt',models=isGPT?(p.models||[]):[];
+ if(!list.length && !models.length)return '';
+ return `<details class="more"><summary>更多</summary>${list.map(w=>`<div class="other"><span>${esc(w.label)}</span><span>${pct(w.remaining)}${w.resetsAt?' · '+esc(short(w.resetsAt)):''}</span></div>`).join('')}${models.length?`<div class="models">${models.map(m=>`<span>${esc(m.name)}${m.isDefault?' · 默认':''}</span>`).join('')}</div>`:''}</details>`;}
+function card(id,p){const isGPT=id==='gpt',s=p.summary||{},old=isOld(p),busy=state.refreshing.includes(id),session=s.session;
+ const r=session?.remaining??null;
+ const plan=isGPT && p.plan?String(p.plan).toUpperCase():'';
+ const status=busy?'更新中…':p.error?'读取失败':old && p.fetchedAt?'数据待更新':p.fetchedAt?'':'尚未连接';
+ return `<section class="provider ${id}">
+  <div class="provider-head"><span class="provider-icon" aria-hidden="true">${isGPT?'G':'✳'}</span><h2>${isGPT?'GPT':'Claude'}</h2>${plan?`<span class="badge">${esc(plan)}</span>`:''}</div>
+  <div class="big ${tone(r)}"><strong>${r===null?'—':Math.round(r)}</strong>${r===null?'':'<em>%</em>'}<span class="cap">${old && p.fetchedAt?'上次 5 小时剩余':'5 小时剩余'}</span></div>
+  <div class="reset">${session?when5(session):`<span class="at">${busy?'正在读取…':'登录后可查看'}</span>`}</div>
+  ${weekly(s.weekly)}${credits(p)}
+  ${p.error?`<p class="error" title="${esc(p.error)}">${esc(p.error)}</p>`:''}
+  ${status?`<p class="health ${p.error?'bad':''}">${esc(status)}${p.fetchedAt&&status?' · '+esc(short(p.fetchedAt)):''}</p>`:''}
+  ${more(id,p,s.others||[])}
+ </section>`;}
+function alertsHTML(list){return list.map(a=>a.kind==='tibo'
+ ?`<div class="alert tibo" role="alert" title="${esc(a.text)}"><span class="alert-icon" aria-hidden="true">⚠︎</span><div class="alert-body"><b>Tibo 说 Codex 要重置额度了，抓紧用完 token！</b><div class="alert-actions"><span>${esc(short(a.at))}</span>${a.url?`<button data-open="${esc(a.url)}">原帖</button>`:''}<button data-dismiss="${esc(a.id)}">知道了</button></div></div></div>`
+ :`<div class="alert credit" role="alert"><span class="alert-icon" aria-hidden="true">⏰</span><div class="alert-body"><b>${a.provider==='gpt'?'GPT':'Claude'} 有 ${a.count} 张重置券快到期</b><div class="alert-actions"><span>还剩 <span class="countdown" data-reset="${a.expiresAt}">${esc(countdown(a.expiresAt))}</span>（${esc(short(a.expiresAt))}）</span></div></div></div>`).join('');}
 function clocks(){document.querySelectorAll('[data-reset]').forEach(el=>{const t=Number(el.dataset.reset);if(t)el.textContent=countdown(t);});}
+function fit(){const h=host();if(!h)return;let height=Math.ceil(document.body.getBoundingClientRect().height);
+ if($('helpDialog').open)height=Math.max(height,520);
+ if(Math.abs(height-lastFit)>2){lastFit=height;h.postMessage('fit:'+height);}}
 async function load(){try{const r=await fetch('state');if(!r.ok)throw Error();const s=await r.json();
- state={...s,refreshing:s.refreshing||[]};if(typeof s.nativeStatus?.compact==='boolean')setCompact(s.nativeStatus.compact);const key=JSON.stringify([s.gpt,s.claude,s.refreshing,isOld(s.gpt),isOld(s.claude)]);
- if(key!==signature){const opened=[...document.querySelectorAll('.provider details[open]')].map(d=>d.closest('.provider').classList.contains('gpt')?'gpt':'claude');
+ state={...s,refreshing:s.refreshing||[]};
+ const key=JSON.stringify([s.gpt,s.claude,s.refreshing,isOld(s.gpt),isOld(s.claude)]);
+ if(key!==signature){const opened=[...document.querySelectorAll('.provider details[open]')].map(d=>d.closest('.provider').classList[1]+'|'+d.className);
   signature=key;$('providers').innerHTML=card('gpt',s.gpt)+card('claude',s.claude);
-  opened.forEach(id=>{const d=document.querySelector('.'+id+' details');if(d)d.open=true;});}
- document.body.classList.toggle('demo',!!s.demo);$('mode').textContent=s.demo?'演示数据 · 非真实账户用量':'账户额度，一目了然';
+  opened.forEach(k=>{const [id,cls]=k.split('|');const d=document.querySelector(`.provider.${id} details.${cls}`);if(d)d.open=true;});}
+ const ak=JSON.stringify(s.alerts||[]);if(ak!==alertSig){alertSig=ak;$('alerts').innerHTML=alertsHTML(s.alerts||[]);}
+ $('claudeKey').hidden=!(s.claude.error || s.hasSessionKey);
+ document.body.classList.toggle('demo',!!s.demo);$('mode').textContent=s.demo?'演示数据 · ':'';
+ if(s.version)$('ver').textContent=s.version;
+ applyTheme(s.theme||'dark');
  $('refresh').disabled=state.refreshing.length>0;
- $('status').textContent=state.refreshing.length?'正在同步账户数据…':'每 5 分钟自动更新';clocks();
+ $('status').textContent=state.refreshing.length?'同步中…':'每 5 分钟更新';document.querySelector('header .mark').title=$('status').textContent;
+ const t=s.tibo||{};$('tibo').textContent=t.ok===false?'Tibo 动态暂时读不到，会自动重试':t.checkedAt?`Tibo 动态 ${short(t.checkedAt).slice(6)} 已查`:'Tibo 动态检查中…';
+ clocks();fit();
  }catch{$('status').textContent='本地连接中断，请重新打开应用';}}
+function applyTheme(t){if(t===theme)return;theme=t;document.body.classList.toggle('light',t==='light');
+ $('theme').textContent=t==='light'?'☾':'☀';$('theme').title=t==='light'?'切换到深色':'切换到浅色';
+ if(host())host().postMessage('theme:'+t);}
 async function action(name){
- if(window.webkit?.messageHandlers?.usageTogether){window.webkit.messageHandlers.usageTogether.postMessage(name);return;}
+ if(host()){host().postMessage(name);return;}
  try {const r=await fetch('action/'+name,{method:'POST'});if(!r.ok)throw Error();
   if(name==='hide' || name==='quit'){
    $('helpDialog').close();document.body.classList.add('closed');$('closedView').hidden=false;
@@ -48,13 +85,24 @@ async function action(name){
  }catch{$('status').textContent='操作未完成，请重新打开应用';}
 }
 $('restore').onclick=()=>action('show');
-function setCompact(value){compact=value;document.body.classList.toggle('compact',compact);$('compact').title=compact?'展开完整视图':'切换紧凑视图';$('compact').setAttribute('aria-label',$('compact').title);$('compact').textContent=compact?'展开视图':'紧凑视图';$('compact').setAttribute('aria-pressed',String(compact));}
-window.setCompact=setCompact;
-$('compact').onclick=()=>{setCompact(!compact);action(compact?'compact':'expand');};
 $('hide').onclick=()=>action('hide');
-$('refresh').onclick=async()=>{$('refresh').disabled=true;try{await fetch('refresh',{method:'POST'});await load();}catch{$('status').textContent='刷新失败，请重新打开应用';$('refresh').disabled=false;}};
-$('help').onclick=()=>{$('helpDialog').showModal();};
-$('closeHelp').onclick=$('doneHelp').onclick=()=>{$('helpDialog').close();};
+$('refresh').onclick=async()=>{$('refresh').disabled=true;$('refresh').classList.add('spin');setTimeout(()=>$('refresh').classList.remove('spin'),900);try{await fetch('refresh',{method:'POST'});await load();}catch{$('status').textContent='刷新失败，请重新打开应用';$('refresh').disabled=false;}};
+$('theme').onclick=async()=>{const t=theme==='light'?'dark':'light';applyTheme(t);try{await fetch('config/theme/'+t,{method:'POST'});}catch{}};
+$('help').onclick=()=>{$('helpDialog').showModal();fit();};
+$('closeHelp').onclick=$('doneHelp').onclick=()=>{$('helpDialog').close();fit();};
+$('alerts').addEventListener('click',async e=>{
+ const open=e.target.closest('[data-open]'),dismiss=e.target.closest('[data-dismiss]');
+ if(open){const url=open.dataset.open;if(!/^https:\/\//.test(url))return;if(host())host().postMessage('open:'+url);else window.open(url,'_blank','noopener');}
+ if(dismiss){try{await fetch('tibo/dismiss/'+encodeURIComponent(dismiss.dataset.dismiss),{method:'POST'});}catch{}alertSig='';load();}
+});
+async function saveKey(value){$('keyMsg').textContent='保存中…';
+ try{const r=await fetch('config/claude-session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionKey:value})});
+  const j=await r.json().catch(()=>({}));$('keyMsg').textContent=r.ok?(value?'已保存，正在重新读取 Claude 用量…':'已清除。'):(j.error||'保存失败');
+  if(r.ok)$('keyInput').value='';load();}catch{$('keyMsg').textContent='保存失败';}}
+$('keyForm').onsubmit=e=>{e.preventDefault();saveKey($('keyInput').value.trim());};
+$('keyClear').onclick=()=>saveKey('');
+document.addEventListener('toggle',fit,true);
+if(window.ResizeObserver)new ResizeObserver(fit).observe(document.body);
+if(!host())document.body.classList.add('browser');
 load();setInterval(load,2000);setInterval(clocks,1000);
-
 $('quitApp').onclick=()=>action('quit');

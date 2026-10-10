@@ -32,3 +32,4 @@ id_ed25519*
 .npmrc
 usage.json.tmp
 *.tmp
+_to_delete/
