@@ -1,146 +1,147 @@
 # Usage Together · 用量伴侣
 
-一个 macOS 菜单栏小工具，同时显示 **GPT（Codex / ChatGPT）** 和 **Claude** 的账户剩余额度、刷新时间和重置券，还会在额度要被重置时提醒你。
+**English** | [中文](README.zh-CN.md)
 
-*A small macOS menu-bar app that shows your remaining Codex/ChatGPT and Claude usage side by side, with reset countdowns, reset-credit reminders and alerts when Codex limits are about to be reset. Read-only: it never sends chats or changes account settings.*
+A small macOS menu-bar app that shows how much **GPT (Codex / ChatGPT)** and **Claude** usage you have left, side by side. It also shows reset times and reset credits, and warns you when a usage reset is coming.
 
 <p align="center">
-  <img src="docs/screenshot-dark.png" alt="深色模式" width="300">
-  <img src="docs/screenshot-light.png" alt="浅色模式" width="300">
+  <img src="docs/screenshot-dark.png" alt="Dark mode" width="300">
+  <img src="docs/screenshot-light.png" alt="Light mode" width="300">
 </p>
 
-<p align="center"><sub>截图使用程序自带的演示数据，不是真实账户用量。</sub></p>
+<p align="center"><sub>The screenshots use the app's built-in demo data, not real account usage.</sub></p>
 
-## 功能
+## Features
 
-- **菜单栏**显示两边的 5 小时剩余额度，比如 `G 76%  C 54%`（G = GPT，C = Claude，`*` 表示数据已过时）。
-- **悬浮小窗口**里，每一边的大数字是 5 小时剩余额度，下面是 5 小时刷新倒计时、每周剩余额度和每周刷新时间。点「更多」可以看其他额度窗口，比如按模型分的每周额度。
-- Claude 的 5 小时额度从你发出第一条消息才开始计时，还没用过时会显示「还没开始计时」。GPT 的 reserved 额度不显示。
-- **重置券提醒**：显示 GPT 和 Claude 的重置券数量。快到期的重置券在到期前 3 天提醒一次，之后每 12 小时提醒一次，直到用掉或到期。
-- **Tibo 动态提醒**：每 10 分钟检查 Tibo 的公开 X 原帖（读取失败时几分钟内自动重试），支持识别 “Global reset by EOD” 等简短公告。首次检测后，菜单栏 ⚠︎ 和窗口警告持续保留，直到读到 GPT 每周额度实际重置。5 小时刷新、已读、重开应用或暂时读取失败都不会提前解除警告。每条公告只发送一次系统通知；已重置和重置券消息会单独显示为信息。
-- **深色 / 浅色**两种主题，点右上角 ☀ / ☾ 切换。
-- 窗口会出现在所有桌面和全屏应用上，切换应用或桌面时一直跟着你。
-- 每 5 分钟自动刷新，也可以点 ↻ 手动刷新。
+- **Menu bar** shows the 5-hour usage left on both sides, for example `G 76%  C 54%` (G = GPT, C = Claude, `*` means the data is out of date).
+- **Small floating window.** The big number on each side is the 5-hour usage left. Under it you see the 5-hour reset countdown, the weekly usage left and the weekly reset time. Click "更多" (More) to see other limits, such as weekly limits for each model.
+- Claude's 5-hour window only starts when you send your first message. Until then the app shows "还没开始计时" (not started yet). GPT's reserved limits are not shown.
+- **Reset-credit reminders.** The app shows how many reset credits you have for GPT and Claude. When a credit will expire within 3 days, it reminds you once, then every 12 hours until you use it or it expires.
+- **Tibo reset alerts.** Every 10 minutes the app checks Tibo's public posts on X (and retries within a few minutes if a check fails). It understands short posts like "Global reset by EOD". Once a reset post is found, the ⚠︎ in the menu bar and the warning in the window stay until your GPT weekly limit has actually reset. A 5-hour reset, marking the alert as read, reopening the app or a failed check will not clear it early. Each post sends only one system notification. Posts saying a reset is already done, or about reset credits, are shown as information.
+- **Dark and light themes.** Switch with ☀ / ☾ in the top-right corner.
+- The window shows on every desktop and over full-screen apps, so it stays with you when you switch apps or desktops.
+- Refreshes automatically every 5 minutes. Click ↻ to refresh now.
 
-## 运行要求
+## Requirements
 
-| 项目 | 要求 |
+| Item | Requirement |
 | --- | --- |
-| 系统 | macOS 13 或以上 |
-| GPT 数据 | 本机已安装并登录 ChatGPT / Codex 桌面版，或 Codex CLI |
-| Claude 数据 | 以下任意一种：已登录的 Claude Code、已登录的 Claude 桌面版，或手动填写的 sessionKey |
-| 构建和测试 | Node.js 20 或以上（Apple Silicon 电脑需要 arm64 版本） |
-| 第三方依赖 | 无，只用 Node.js 自带模块和 macOS 自带工具 |
+| System | macOS 13 or later |
+| GPT data | ChatGPT / Codex desktop app, or Codex CLI, installed and signed in on this Mac |
+| Claude data | Any one of: Claude Code signed in, the Claude desktop app signed in, or a sessionKey you paste in |
+| Build and test | Node.js 20 or later (arm64 build on Apple Silicon Macs) |
+| Third-party packages | None. Only Node.js built-in modules and tools that come with macOS |
 
-只登录了其中一边也可以用，另一边会显示「—」和提示。
+It also works if you only use one of the two services. The other side shows "—" and a hint.
 
-## 快速开始
+## Quick start
 
-可以从 [Releases](../../releases/latest) 下载打包好的 macOS 应用。安装包仅包含程序和 Node.js 运行时，不包含任何使用者的账户资料。
+You can download the ready-made macOS app from [Releases](../../releases/latest). The download only contains the app and the Node.js runtime. It does not contain anyone's account data.
 
 ```sh
 git clone https://github.com/PaulChen0508/usage-together.git
 cd usage-together
 
-npm test          # 运行自带测试
-npm run preview   # 用演示数据启动本地服务，把输出的地址粘到浏览器里就能预览界面
-npm run build     # 构建应用，输出到 dist/Usage Together.app
+npm test          # run the tests
+npm run preview   # start the local service with demo data; open the printed address in a browser to preview the window
+npm run build     # build the app into dist/Usage Together.app
 ```
 
-也可以不用 npm，直接运行：
+Without npm, you can run:
 
 ```sh
-sh build.sh "/绝对路径/Usage Together.app" "$(which node)"
+sh build.sh "/absolute/path/Usage Together.app" "$(which node)"
 ```
 
-`build.sh` 会把你指定的 Node.js 可执行文件一起打包进应用，所以构建出来的应用在别的 Mac 上不需要再装 Node。应用使用本地临时签名，没有经过 Apple 公证，第一次打开时可能需要在「系统设置 → 隐私与安全性」里点「仍要打开」。
+`build.sh` copies the Node.js binary you give it into the app, so the built app runs on other Macs without installing Node. The app is signed locally (ad-hoc) and is not notarized by Apple. The first time you open it, you may need to go to System Settings → Privacy & Security and click "Open Anyway".
 
-## 使用
+## How to use
 
-- **单击**菜单栏的用量数字弹出菜单；**双击**打开窗口，再双击收起。
-- 拖动窗口最上面的细条可以移动窗口。
-- 窗口右上角：☀ / ☾ 切换主题，↻ 刷新，? 查看说明，「隐藏」收到菜单栏。
-- 退出请用菜单栏菜单里的「退出」，或说明里的「退出程序」。
+- **Click** the numbers in the menu bar to open the menu. **Double-click** to open the window, and double-click again to hide it.
+- Drag the thin strip at the top of the window to move it.
+- Top-right of the window: ☀ / ☾ switches the theme, ↻ refreshes, ? shows help, and "隐藏" (Hide) puts the window away in the menu bar.
+- To quit, use "退出" (Quit) in the menu bar menu, or "退出程序" in the help panel.
 
-### Claude 读不到怎么办
+### If Claude usage can't be read
 
-程序会按顺序尝试三种方式读取 Claude 用量：
+The app tries three ways to read Claude usage, in this order:
 
-1. **Claude Code 的登录**：从 macOS 钥匙串或 `~/.claude/.credentials.json` 读取。
-2. **手动填写的 sessionKey**：Claude 读取失败时，窗口里会出现「Claude 读不到？手动填写 sessionKey」。在浏览器登录 claude.ai，打开开发者工具 → Application / 存储 → Cookies → claude.ai，复制 `sessionKey` 的值（以 `sk-ant-` 开头）粘贴进去即可。
-3. **Claude 桌面版的登录**：读取桌面版本机保存的登录信息。第一次读取时 macOS 会弹出钥匙串授权（Claude Safe Storage），点「始终允许」。
+1. **Claude Code sign-in**, from the macOS Keychain or `~/.claude/.credentials.json`.
+2. **A sessionKey you paste in.** When Claude can't be read, the window shows "Claude 读不到？手动填写 sessionKey". Sign in to claude.ai in your browser, open Developer Tools → Application / Storage → Cookies → claude.ai, copy the value of `sessionKey` (it starts with `sk-ant-`) and paste it in.
+3. **Claude desktop app sign-in**, read from the desktop app's local data. The first time, macOS asks for Keychain access ("Claude Safe Storage"). Click "Always Allow".
 
-## 数据范围和准确性
+## What the numbers mean
 
-- GPT 额度是 **Codex / ChatGPT 的账户额度**，不包括 OpenAI API 的账单用量。多个模型可能共用一份额度，程序不会给每个模型编一个独立额度。
-- 剩余比例 = 100% − 已用比例，不能换算成固定的聊天次数。
-- 账户没有返回的数据显示「—」，不会当成 0% 或 100%。
-- 读取失败时保留上一次成功的数据，并标明是旧数据。
-- 接口返回 HTTP 429（限流）时，程序会暂停查询 15 分钟。
-- Tibo 提醒依赖 FxTwitter、公开 X 镜像和 X 接口这些公开来源。不稳定的来源会自动多试几次；只返回旧帖子的来源不算读取成功；连续读不到时才在窗口里提示，并在几分钟内自动重试。来源可能有缓存延迟，不能保证实时检测。
-- 重置警告解除以账户每周额度为依据，不按 EOD 或固定 24 小时自动解除。每周进入新周期、已用比例归零或明显回落时解除；用量每 5 分钟更新一次，解除也可能稍晚。
+- The GPT numbers are your **Codex / ChatGPT account limits**. They do not include OpenAI API billing. Several models may share one limit; the app does not invent a separate limit for each model.
+- Usage left = 100% − usage used. It can't be turned into a fixed number of messages.
+- If the account doesn't return a value, the app shows "—". It never treats a missing value as 0% or 100%.
+- If a check fails, the app keeps the last good data and marks it as old.
+- If a service returns HTTP 429 (rate limited), the app stops asking it for 15 minutes.
+- Tibo alerts depend on public sources: FxTwitter, a public X mirror and X's own timeline. Unreliable sources are tried a few times. A source that only returns old posts does not count as a successful check. The window only says the posts can't be read after several failures in a row, and the app keeps retrying every few minutes. Sources may be cached, so alerts can't be guaranteed to be instant.
+- A reset warning is cleared by your account's weekly limit, not by "end of day" or a fixed 24 hours. It clears when a new weekly period starts, or when weekly usage drops to zero or drops clearly. Usage updates every 5 minutes, so the warning may clear a little late.
 
-## 工作原理
+## How it works
 
-- **GPT**：在本机启动 `codex app-server`，只调用 `account/rateLimits/read` 和 `model/list` 两个只读接口。
-- **Claude**：用 Claude Code 的登录请求 `api.anthropic.com/api/oauth/usage`；用 sessionKey 或桌面版登录时，请求 `claude.ai` 上的用量接口。
-- **Tibo 动态**：依次尝试 FxTwitter 公开接口、公开 X 镜像和 X 时间线接口，每个来源可自动重试，只返回旧帖子的来源不算成功；只识别 Tibo 自己发布的原帖，排除新闻、其他作者、引用的旧消息和无关重置。首次检测的公告和每周额度观察保存在本机，用于持续警告和通知去重。
-- **网络**：优先使用 macOS 自带的网络功能发请求，所以会自动跟随系统代理；这个功能在当前系统上不可用时，自动改用 Node.js 自带的请求。
-- **界面**：由一个只监听 `127.0.0.1` 的本地服务提供，地址里带有每次启动随机生成的访问码，并检查 Host 和 Origin，其他网页无法访问。
-- **原生窗口**：`native.js` 用 macOS 自带的 JavaScript for Automation (JXA) 创建悬浮窗口和菜单栏图标。它不直接请求本地服务，而是读取本地服务写在系统私有临时目录里的状态文件，所以主线程不会因为网络卡住。
-- **自动恢复**：菜单栏程序每 3 秒写一次心跳文件。如果电脑醒着时心跳停了 60 秒，本地服务会结束卡住的程序并重新打开。本地服务没有响应时，菜单栏程序也会自动重启它。
+- **GPT:** starts `codex app-server` on your Mac and only calls two read-only methods: `account/rateLimits/read` and `model/list`.
+- **Claude:** with a Claude Code sign-in, it calls `api.anthropic.com/api/oauth/usage`. With a sessionKey or the desktop app sign-in, it calls the usage endpoint on `claude.ai`.
+- **Tibo posts:** tries the FxTwitter public API, a public X mirror and X's timeline, in that order. Each source can be retried, and a source that only has old posts does not count. Only Tibo's own posts are used; news, other authors, quoted old posts and unrelated "resets" are ignored. The first reset post found and the weekly-limit readings are saved on your Mac, so the warning can stay on and notifications are not repeated.
+- **Network:** uses macOS's own networking first, so it follows your system proxy. If that doesn't work on your system, it falls back to Node.js's built-in `fetch`.
+- **Window content:** served by a local service that only listens on `127.0.0.1`. The address includes a random access code created at each start, and the service checks the Host and Origin headers, so other web pages can't read it.
+- **Native window:** `native.js` uses JavaScript for Automation (JXA), which comes with macOS, to create the floating window and the menu-bar item. It never waits on the local service. Instead it reads a small status file that the service writes into a private temp folder, so the main thread can't get stuck on the network.
+- **Self-recovery:** the menu-bar app writes a heartbeat file every 3 seconds. If the heartbeat stops for 60 seconds while the Mac is awake, the local service closes the stuck app and opens it again. If the local service stops answering, the menu-bar app restarts it. When the app starts, it also closes any other copy that is still running.
 
-## 隐私和安全
+## Privacy and security
 
-- 只读取用量，不发送聊天，不消耗重置券，不修改任何账户设置。
-- 自动读取的登录信息只在内存中使用。查询所需的凭据仅发送给对应账户服务（Anthropic / claude.ai；Codex 的官方本机服务管理自己的登录），不会发送到 GitHub、X 镜像或其他公开平台，也不会写进日志或界面。
-- 程序在本机 `~/Library/Application Support/Usage Together/` 里保存这些文件，权限都只有你自己可读写：
-  - `usage.json`：最近一次的用量（不含登录信息）
-  - `reminders.json`：哪些提醒已经发过
-  - `tibo.json`：公开公告、持续提醒状态与每周额度观察；属于本机数据，不上传仓库
-  - `theme.txt`：深色还是浅色
-  - `claude-session-key`：只有你手动填写了 sessionKey 才会有，可以在窗口里点「清除」删掉
-- 本机登录资料、缓存、提醒状态和账户截图均不包含在源码或安装包中。`.gitignore` 也忽略这些运行数据；发布时仍需检查实际文件清单，因为忽略规则不能清除已经提交的文件。
+- The app only reads usage. It never sends chats, never uses reset credits and never changes account settings.
+- Sign-in data that the app reads is only kept in memory. It is only sent to the matching account service (Anthropic / claude.ai; the official Codex app manages its own sign-in). It is never sent to GitHub, X mirrors or any other public service, and it is never written to logs or shown in the window.
+- The app saves these files in `~/Library/Application Support/Usage Together/`. Only you can read or write them:
+  - `usage.json`: the latest usage numbers (no sign-in data)
+  - `reminders.json`: which reminders were already sent
+  - `tibo.json`: public reset posts, the warning state and weekly-limit readings; local data only, never uploaded
+  - `theme.txt`: dark or light
+  - `claude-session-key`: only exists if you pasted a sessionKey; click "清除" (Clear) in the window to delete it
+- Sign-in data, caches, reminder state and account screenshots are not part of the source code or the download. `.gitignore` also ignores these files. Still check the actual file list before publishing, because ignore rules can't remove files that were already committed.
 
-## 项目结构
+## Project files
 
-| 文件 | 作用 |
+| File | What it does |
 | --- | --- |
-| `backend.js` | 本地服务：读取 GPT 和 Claude 用量、Tibo 动态、提醒、缓存、提供界面 |
-| `native.js` | macOS 原生悬浮窗口和菜单栏 |
-| `index.html` / `ui.js` / `style.css` | 窗口里显示的界面 |
-| `test.js` | 自动测试（数据解析、模拟 Codex、本地服务的访问限制、退出流程、状态文件和看门狗等） |
-| `tibo.test.js` | 公告识别、持续警告、每周重置解除、重开与通知去重测试；使用公开公告及模拟额度 |
-| `build.sh` | 构建 `.app` 应用包 |
-| `AppIcon.icns` | 应用图标 |
-| `package.json` | 项目信息和 `npm` 命令 |
-| `Node-LICENSE.txt` | 打包进应用的 Node.js 的许可证 |
+| `backend.js` | Local service: reads GPT and Claude usage and Tibo posts, sends reminders, caches data and serves the window |
+| `native.js` | Native macOS floating window and menu-bar item |
+| `index.html` / `ui.js` / `style.css` | What the window shows |
+| `test.js` | Tests for data parsing, a fake Codex, local-service access rules, quitting, the status file, the watchdog and more |
+| `tibo.test.js` | Tests for reset-post detection, sources and retries, lasting warnings, clearing on weekly reset, restarts and notification de-duplication; uses public posts and fake usage |
+| `build.sh` | Builds the `.app` bundle |
+| `AppIcon.icns` | App icon |
+| `package.json` | Project info and `npm` scripts |
+| `Node-LICENSE.txt` | License for the Node.js runtime bundled in the app |
 
-## 常见问题
+## FAQ
 
-**Claude 显示「登录已过期」**：打开一次 Claude Code 或 Claude 桌面版，登录会自动续期，然后点刷新。也可以改用手动填写 sessionKey。
+**Claude says the sign-in has expired:** open Claude Code or the Claude desktop app once so the sign-in renews, then click refresh. You can also paste a sessionKey instead.
 
-**GPT 显示「未找到 Codex」**：安装 ChatGPT / Codex 官方桌面版或 Codex CLI。如果装在不常见的位置，可以用环境变量 `USAGE_CODEX_PATH` 指定路径。
+**GPT says Codex was not found:** install the official ChatGPT / Codex desktop app or the Codex CLI. If it's installed somewhere unusual, set the `USAGE_CODEX_PATH` environment variable to its path.
 
-**数字后面有 `*`**：表示数据超过 10 分钟没更新，或者已经过了刷新时间还没读到新数据。
+**There's a `*` after a number:** the data hasn't updated for more than 10 minutes, or the reset time has passed and new data hasn't arrived yet.
 
-## 版本记录
+## Version history
 
-- **2.3.5**（当前版本）：修复菜单栏卡住、双击不弹窗口的问题。原因是更新后旧版本的进程还在运行，而且新旧版本的应用 ID 相同，打开新版时 macOS 只会唤起旧进程；旧进程的界面文件已经被删除，窗口打开后是空的。现在新版启动时会关掉其他正在运行的副本；正在运行的应用文件被删除或替换时，会自动切换到已安装的版本；界面文件在启动时读入内存，移动应用也不会出现空窗口；双击时如果窗口被挡住或页面没有响应，会重新显示并刷新，而不是把它收起。修复 Tibo 原帖经常读不到的问题：原来的 X 镜像已经停止服务，X 时间线接口经常限流且只返回几个月前的旧帖子。现在新增 FxTwitter 来源并自动重试，旧帖子不再算作读取成功；读取失败后 2 分钟左右重试，而不是等 10 分钟；只有连续失败才提示「读不到」。
-- **2.3.4**：彻底修复放一段时间后整个程序卡死、双击菜单栏也打不开窗口、只能退出重开的问题。原因是菜单栏程序每 3 秒在主线程上同步请求一次本地服务，只要有一次请求被卡住，整个程序就会冻住。现在菜单栏改为读取本地服务每 2 秒写入的状态文件，主线程不再等待任何网络请求；「立即刷新」交给独立的 curl 进程；后台服务重启不再让界面等待；系统通知改由本地服务直接发出。另外新增看门狗：菜单栏程序在电脑醒着时连续 60 秒没有心跳（菜单打开时除外），本地服务会自动结束它并重新打开，不用再手动退出重开。
-- **2.3.3**：修复 Tibo 重置警告被误显示成“Claude 有 undefined 张重置券快到期”的问题。修复用久了窗口卡住、打不开的问题：菜单栏读数改为每 3 秒一次并缩短等待时间；后台服务启动和重启都有时间上限；窗口内页面被系统关闭或失联时自动重新加载；阻止 App Nap 让菜单栏变慢；窗口位置跑到屏幕外时自动拉回主屏幕。
-- **2.3.2**：重置警告从首次检测开始持续保留，直到 GPT 每周额度实际重置；5 小时刷新、已读、重开和读取失败不清除；已结束的公告不会重复触发。加强本机缓存及凭据文件的忽略规则。
-- **2.3.1**：修复 Tibo 来源失效、简短公告漏报及错误的“已查”状态；区分即将重置、已重置和重置券消息，支持提醒去重及重开后保留。
-- **2.3.0**：菜单栏和窗口改为突出 5 小时剩余额度；新增深色 / 浅色主题、重置券到期提醒、Tibo 重置动态提醒和系统通知；Claude 支持 Claude 桌面版登录和手动 sessionKey；窗口改为小巧的悬浮样式，出现在所有桌面和全屏应用上；单击菜单栏弹出菜单，双击开关窗口。
-- **2.0.2**：修复切换紧凑视图时闪退的问题。
-- **2.0.1**：修复隐藏和退出按钮；退出时会同时结束本地服务。
-- **2.0.0**：重写数据层，支持全部 GPT 额度分组、自动读取模型列表、Claude 两种返回格式。
+- **2.3.5** (current): Fixed the menu bar freezing and double-click not opening the window. After an update, an old copy of the app kept running. Because both copies share one app ID, opening the new app only woke up the old one, whose window files had already been deleted, so the window was empty. Now the app closes any other running copy when it starts. If the running app file is deleted or replaced, it switches to the installed app. Window files are loaded into memory at start, so moving the app no longer leaves an empty window. If the window is covered or not responding, double-click shows and reloads it instead of hiding it. Also fixed Tibo posts often failing to load: the old X mirror had shut down, and X's timeline was often rate limited and only returned posts that were months old. Added FxTwitter as a source with automatic retries; old posts no longer count as a successful check; a failed check is retried after about 2 minutes instead of 10; "can't read" is only shown after several failures in a row.
+- **2.3.4:** Fixed the whole app freezing after a while, with double-click unable to open the window until you quit and reopened it. The menu-bar app used to ask the local service for data on the main thread every 3 seconds, and one stuck request froze everything. Now it reads a status file that the service writes every 2 seconds, so the main thread never waits on the network. "Refresh now" runs in a separate curl process, restarting the service no longer blocks the window, and system notifications come from the service. Added a watchdog: if the menu-bar app has no heartbeat for 60 seconds while the Mac is awake (except while its menu is open), the service closes and reopens it.
+- **2.3.3:** Fixed a Tibo reset warning being shown as "Claude 有 undefined 张重置券快到期" (Claude has undefined reset credits expiring). Fixed the window freezing or not opening after long use: menu-bar numbers update every 3 seconds with shorter waits; starting and restarting the service have time limits; the window page reloads if macOS closes it; App Nap is turned off so the menu bar stays quick; a window that ended up off screen is moved back to the main screen.
+- **2.3.2:** A reset warning now stays from the moment it's found until the GPT weekly limit actually resets. 5-hour resets, marking as read, reopening and failed checks don't clear it, and old posts don't trigger it again. Stronger ignore rules for local cache and sign-in files.
+- **2.3.1:** Fixed broken Tibo sources, missed short posts and a wrong "checked" status. Separated "reset coming", "reset done" and reset-credit posts; reminders are no longer repeated and survive a restart.
+- **2.3.0:** The menu bar and window now focus on the 5-hour usage left. Added dark and light themes, reset-credit reminders, Tibo reset alerts and system notifications. Claude can now be read from the Claude desktop app or a pasted sessionKey. The window became a small floating panel that shows on every desktop and over full-screen apps. Click the menu bar for the menu, double-click to open or hide the window.
+- **2.0.2:** Fixed a crash when switching to compact view.
+- **2.0.1:** Fixed the hide and quit buttons; quitting now also stops the local service.
+- **2.0.0:** Rewrote the data layer. Supports every GPT limit group, reads the model list automatically and handles both Claude response formats.
 
-## 注意
+## Notes
 
-- 这是个人项目，**不是 OpenAI 或 Anthropic 的官方产品**，与它们没有任何关联。
-- Claude 的用量接口没有公开文档，服务端以后的变动可能导致读取失败。
+- This is a personal project. It is **not an official OpenAI or Anthropic product** and is not connected to either company.
+- Claude's usage endpoint is not publicly documented, so future changes on their side may break it.
+- The app's interface is in Chinese. Words in quotes above, such as "更多", are the labels you'll see in the app.
 
-## 许可
+## License
 
-代码使用 [MIT License](LICENSE)。`Node-LICENSE.txt` 是打包进应用的 Node.js 运行时的许可证。
+The code is under the [MIT License](LICENSE). `Node-LICENSE.txt` is the license for the Node.js runtime bundled in the app.
