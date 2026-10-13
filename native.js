@@ -6,8 +6,13 @@ ObjC.import('stdlib');
 var panel, web, status, controller, task, serviceInputPipe, compact = false, baseURL, closing = false, lastFit = 0, lastTitle = '', lastTip = '', scriptApp = null, statusMenu = null, failures = 0, resourcesPath = null, pendingMenu = false, lastClick = 0, clickWindow = 0.35;
 // Page health: the page reports 'alive' after each good update. If it goes quiet, the page is reloaded or the service restarted.
 var lastAlive = 0, showAt = 0, lastRecover = 0, activity = null;
-// How often (seconds) the menu bar asks the local service for new numbers. Each ask runs on the main thread, so keep it rare.
+// How often (seconds) the menu bar reads new numbers.
 var TICK = 3;
+// The main thread never waits on the network. The service writes its numbers to a small private file (statusFile)
+// every 2 s, and the app reads that file. The app writes its own heartbeat (beatFile) every tick, so the service
+// can tell if the app itself has frozen and restart it. Requests to the service (refresh) run in a separate curl process.
+var urlFile = null, statusFile = null, beatFile = null, starting = 0, nextStartAt = 0, startFailures = 0;
+var lastTickAt = 0, graceUntil = 0, lastStatusAt = 0, menuOpen = false, helpers = [];
 var VALID_URL = /^http:\/\/127\.0\.0\.1:\d+\/[a-f0-9]{48}\/$/;
 // CanJoinAllSpaces | Stationary | IgnoresCycle | FullScreenAuxiliary:
 // the window is on every desktop and over full-screen apps, so it stays put whatever app or desktop you switch to.
@@ -16,22 +21,31 @@ var SPACE_BEHAVIOR = (1 << 0) | (1 << 4) | (1 << 6) | (1 << 8);
 var STRIP = 12;
 // Everything inside the window is drawn at this scale, so text and numbers shrink in proportion.
 var ZOOM = 0.85;
+// Send a request to the local service without waiting for it: a separate curl process does the work,
+// so the main thread can never get stuck here (the old synchronous request could hang the whole app).
 function post(route) {
   if(!baseURL)return;
-  const request=$.NSMutableURLRequest.requestWithURL($.NSURL.URLWithString(baseURL+route));
-  request.HTTPMethod='POST';
-  request.timeoutInterval=0.5;
-  $.NSURLConnection.sendSynchronousRequestReturningResponseError(request,null,null);
+  try{
+    helpers=helpers.filter(t=>{try{return !!t.running;}catch(e){return false;}});
+    if(helpers.length>=4)return;
+    const t=$.NSTask.alloc.init; t.launchPath='/usr/bin/curl';
+    t.arguments=['-s','-m','5','--noproxy','*','-X','POST','-o','/dev/null',baseURL+route];
+    const nul=$.NSFileHandle.fileHandleWithNullDevice;
+    t.standardInput=nul; t.standardOutput=nul; t.standardError=nul;
+    t.launch; helpers.push(t);
+  }catch(e){}
 }
-// Every call to the local service has a short time limit, so a slow or stuck service can never freeze the menu bar or the window.
-// The service is on this Mac and normally answers in a few milliseconds.
-function getText(route,timeout){
-  if(!baseURL)return null;
-  const request=$.NSMutableURLRequest.requestWithURL($.NSURL.URLWithString(baseURL+route));
-  request.timeoutInterval=timeout||0.6;
-  const data=$.NSURLConnection.sendSynchronousRequestReturningResponseError(request,null,null);
-  if(!data || data.isNil())return null;
-  return ObjC.unwrap($.NSString.alloc.initWithDataEncoding(data,$.NSUTF8StringEncoding));
+// Reading a small local file takes microseconds and cannot hang.
+function readFile(p){
+  if(!p)return null;
+  try{ const s=$.NSString.stringWithContentsOfFileEncodingError(p,$.NSUTF8StringEncoding,null);
+    return (s && !s.isNil())?ObjC.unwrap(s):null; }catch(e){ return null; }
+}
+function removeFile(p){ if(p)try{ $.NSFileManager.defaultManager.removeItemAtPathError(p,null); }catch(e){} }
+// Heartbeat for the service's watchdog. menu=1 while the menu is open (the app is waiting on the user, not frozen).
+function writeBeat(){
+  if(!beatFile)return;
+  try{ $(JSON.stringify({at:Date.now(),menu:menuOpen?1:0})).writeToFileAtomicallyEncodingError(beatFile,true,$.NSUTF8StringEncoding,null); }catch(e){}
 }
 function fresh(p){return !!(p && !p.error && p.fetchedAt && Date.now()/1000-p.fetchedAt<=600);}
 // Menu bar shows the 5-hour window only.
@@ -76,11 +90,12 @@ function reloadPage(){
   lastAlive=Date.now();
   try{ web.loadRequest($.NSURLRequest.requestWithURL($.NSURL.URLWithString(baseURL))); }catch(e){}
 }
-// The page stopped reporting: restart the service if it no longer answers, otherwise just reload the page.
+// The page stopped reporting: restart the service if it has gone quiet too, otherwise just reload the page.
 function recover(){
   if(closing)return;
   const now=Date.now(); if(now-lastRecover<10000)return; lastRecover=now;
-  if(!task || !task.running || !getText('native',1))restartService(); else reloadPage();
+  if(starting)return;
+  if(!task || !task.running || now-lastStatusAt>20000)restartService(); else reloadPage();
 }
 // Bring the window to whichever desktop (Space) the user is on now.
 function show(){
@@ -93,18 +108,9 @@ function show(){
     showAt=Date.now();
     controller.performSelectorWithObjectAfterDelay('checkPage:',null,4);
   }catch(e){}
-  try{post('host/show/'+(panel.isVisible?'1':'0'));}catch(e){}
 }
 function openLink(url){ if(/^https:\/\/[^\s]+$/.test(url)) $.NSWorkspace.sharedWorkspace.openURL($.NSURL.URLWithString(url)); }
-function notify(n){
-  const title=String(n.title||'用量伴侣'), body=String(n.body||''), subtitle=String(n.subtitle||'');
-  // shown by a separate helper process, so the app itself never waits on it
-  try{
-    const t=$.NSTask.alloc.init; t.launchPath='/usr/bin/osascript';
-    t.arguments=['-e','on run argv','-e','display notification (item 1 of argv) with title (item 2 of argv) subtitle (item 3 of argv) sound name "Glass"','-e','end run',body,title,subtitle];
-    t.launch;
-  }catch(e){}
-}
+// System notifications are now shown by the service itself, so the app does not handle them.
 // Dark: dark see-through background. Light: same see-through, but white.
 var theme='';
 function setTheme(t){
@@ -120,8 +126,7 @@ function perform(name){
   if(name.indexOf('theme:')===0){setTheme(name.slice(6));return;}
   if(name.indexOf('fit:')===0){fit(Number(name.slice(4)));return;}
   if(name.indexOf('open:')===0){openLink(name.slice(5));return;}
-  switch(name){case 'hide':panel.orderOut(null);break;case 'show':show();return;case 'quit':quit();return;default:return;}
-  try{post('host/'+name+'/'+(panel.isVisible?'1':'0'));}catch(e){}
+  switch(name){case 'hide':panel.orderOut(null);return;case 'show':show();return;case 'quit':quit();return;default:return;}
 }
 // Clicks on the menu bar numbers. A transparent view covers the button and receives the mouse-down itself,
 // so the click count comes straight from the event: 1 = menu (after a short wait), 2 = open the window.
@@ -150,6 +155,8 @@ function openMenu(){
   log('open menu');
   // Show the menu right under the menu bar numbers.
   try{ status.button.highlight(true); }catch(e){}
+  // While the menu is open the app waits for the user; tell the watchdog this is not a freeze.
+  menuOpen=true; writeBeat();
   try{ status.popUpStatusItemMenu(statusMenu); log('menu closed (popUpStatusItemMenu)'); }
   catch(e){
     log('popUpStatusItemMenu failed: '+e);
@@ -157,47 +164,71 @@ function openMenu(){
       statusMenu.popUpMenuPositioningItemAtLocationInView(null,$.NSMakePoint(0,flipped?h+5:-5),bt); log('menu closed (positioned)'); }
     catch(e2){ log('positioned failed: '+e2); }
   }
+  menuOpen=false; writeBeat();
   try{ status.button.highlight(false); }catch(e){}
 }
-function startService(){
+// Start the local service. It writes its address to a private temp file; this only launches it and returns at once.
+function launchService(){
   const resources=resourcesPath, fm=$.NSFileManager.defaultManager;
   const pid=String($.NSProcessInfo.processInfo.processIdentifier);
-  // The service writes its address to this private temp file. Waiting for the file has a time limit;
-  // the old way (a blocking read of the service's output) could freeze the whole app if the service never answered.
-  const urlFile=ObjC.unwrap($.NSTemporaryDirectory().stringByAppendingPathComponent('usage-together-'+pid+'.url'));
-  try{ fm.removeItemAtPathError(urlFile,null); }catch(e){}
+  const base=ObjC.unwrap($.NSTemporaryDirectory().stringByAppendingPathComponent('usage-together-'+pid));
+  urlFile=base+'.url'; statusFile=base+'.status.json'; beatFile=base+'.beat';
+  removeFile(urlFile); removeFile(statusFile);
+  writeBeat();
   task=$.NSTask.alloc.init;
   task.launchPath=resources+'/runtime/node';
   const args=[resources+'/backend.js'];
   if(fm.fileExistsAtPath(resources+'/DEMO'))args.push('--demo');
-  args.push('--native-host','--host-pid',pid,'--url-file',urlFile);
+  args.push('--native-host','--host-pid',pid,'--url-file',urlFile,'--status-file',statusFile,'--beat-file',beatFile);
   task.arguments=args;
   serviceInputPipe=$.NSPipe.alloc.init;
   task.standardInput=serviceInputPipe.fileHandleForReading;
   task.standardOutput=$.NSFileHandle.fileHandleWithNullDevice;
   task.standardError=$.NSFileHandle.fileHandleWithNullDevice;
   baseURL='';
+  starting=Date.now(); lastStatusAt=0;
   task.launch;
-  for(let i=0;i<200 && !baseURL;i++){
-    const s=$.NSString.stringWithContentsOfFileEncodingError(urlFile,$.NSUTF8StringEncoding,null);
-    if(s && !s.isNil()){ const u=ObjC.unwrap(s).trim(); if(VALID_URL.test(u)){ baseURL=u; break; } }
+}
+// True once the service has written its address.
+function serviceReady(){
+  const s=readFile(urlFile); if(!s)return false;
+  const u=s.trim(); if(!VALID_URL.test(u))return false;
+  baseURL=u; starting=0; startFailures=0; lastStatusAt=Date.now();
+  return true;
+}
+// Used once at launch: wait (at most 10 s) because the window needs the address before it can show anything.
+function startService(){
+  launchService();
+  for(let i=0;i<200;i++){
+    if(serviceReady())return;
     if(!task.running)break;
     $.NSThread.sleepForTimeInterval(0.05);
   }
-  if(!baseURL){ try{ if(task.running)task.terminate; }catch(e){} throw Error('服务未启动'); }
+  try{ if(task.running)task.terminate; }catch(e){}
+  starting=0;
+  throw Error('服务未启动');
 }
-// The service stopped or stopped answering: start a fresh one and reload the window.
+function killTask(t){
+  try{ if(t && t.running){ const pid=String(t.processIdentifier); t.terminate;
+    const k=$.NSTask.alloc.init; k.launchPath='/bin/kill'; k.arguments=['-9',pid]; k.launch; } }catch(e){}
+}
+// The service stopped or stopped answering: start a fresh one. This never waits; tick() picks up the new address
+// and reloads the window. If it keeps failing, wait longer between tries (up to 1 minute).
 function restartService(){
   if(closing || !resourcesPath)return;
-  failures=0;
-  try{ if(task && task.running){ const pid=String(task.processIdentifier); task.terminate;
-    const k=$.NSTask.alloc.init; k.launchPath='/bin/kill'; k.arguments=['-9',pid]; k.launch; } }catch(e){}
-  lastRecover=Date.now();
-  try{ startService(); }catch(e){ return; }
-  reloadPage();
+  const now=Date.now();
+  if(starting || now<nextStartAt)return;
+  failures=0; lastRecover=now;
+  killTask(task);
+  try{ launchService(); }catch(e){ starting=0; }
 }
-function stopService(){closing=true;if(task && task.running)task.terminate;}
-function quit(){if(closing)return;closing=true;try{post('action/quit');}catch(e){}if(task && task.running)task.terminate;$.exit(0);}
+function startFailed(){
+  killTask(task); starting=0; startFailures++;
+  nextStartAt=Date.now()+Math.min(60000,3000*Math.pow(2,startFailures-1));
+}
+function cleanupFiles(){ removeFile(statusFile); removeFile(beatFile); removeFile(urlFile); }
+function stopService(){closing=true;if(task && task.running)task.terminate;cleanupFiles();}
+function quit(){if(closing)return;closing=true;try{if(task && task.running)task.terminate;}catch(e){}cleanupFiles();$.exit(0);}
 function idle(){try{if(controller && !closing)controller.tick(null);}catch(e){}return TICK;}
 function reopen(){if(panel)show();}
 ObjC.registerSubclass({name:'UTClickView',superclass:'NSView',methods:{
@@ -233,13 +264,26 @@ ObjC.registerSubclass({name:'UsageTogetherController',superclass:'NSObject',prot
  'tick:':{types:['void',['id']],implementation:function(){
    if(closing)return;
    try{
-     if(task && !task.running){restartService();return;}
-     const text=getText('native');
-     if(!text){ if(++failures>=5)restartService(); return; }
-     failures=0;
+     const now=Date.now();
+     // A long gap since the last tick means the Mac was asleep: give everything a moment to wake up before judging it.
+     if(lastTickAt && now-lastTickAt>15000)graceUntil=now+20000;
+     lastTickAt=now;
+     writeBeat();
+     if(starting){
+       if(serviceReady()){ reloadPage(); return; }
+       if(!task || !task.running || now-starting>15000)startFailed();
+       return;
+     }
+     if(!task || !task.running){restartService();return;}
+     // The service rewrites this file every 2 s; reading it can never block.
+     const text=readFile(statusFile);
+     let snapshot=null; try{ snapshot=text?JSON.parse(text):null; }catch(e){}
+     if(snapshot && typeof snapshot.at==='number' && snapshot.at>lastStatusAt)lastStatusAt=snapshot.at;
+     // No fresh numbers for 20 s: the service is stuck, start a new one.
+     if(now-lastStatusAt>20000){ if(now>graceUntil)restartService(); return; }
+     if(!snapshot || !snapshot.state)return;
      // Window open but the page has gone quiet for 30 s: bring it back.
-     if(panel.isVisible && Date.now()-lastAlive>30000)recover();
-     const snapshot=JSON.parse(text);
+     if(panel.isVisible && now-lastAlive>30000 && now>graceUntil)recover();
      const alerts=snapshot.alerts||[];
      const tibo=alerts.some(a=>a.kind==='tibo' && a.warning!==false), credit=alerts.some(a=>a.kind==='credit');
      const title=(tibo||credit?'⚠︎':'')+'G'+fiveHour(snapshot.state.gpt)+' C'+fiveHour(snapshot.state.claude);
@@ -248,8 +292,6 @@ ObjC.registerSubclass({name:'UsageTogetherController',superclass:'NSObject',prot
      if(tibo)tip+='\n⚠︎ '+String(alerts.find(a=>a.kind==='tibo' && a.warning!==false).title||'Tibo 发布了额度重置消息')+'（保留至每周额度重置）';
      if(credit)tip+='\n⏰ 有重置券 3 天内到期';
      if(tip!==lastTip){status.button.toolTip=tip;lastTip=tip;}
-     (snapshot.notifications||[]).forEach(notify);
-     if(snapshot.action)perform(snapshot.action);
    }catch(e){}
  }}
 }});

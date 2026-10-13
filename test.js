@@ -80,3 +80,35 @@ test('compact mode changes independently of window visibility and preserves acco
   s=await signal('expand',1);assert.equal(s.nativeStatus.compact,false);assert.deepEqual(s.gpt,original);
  }finally{app.stop();}
 });
+
+// 2.3.4: the menu bar app reads a status file instead of calling the service, and the service watches the app's heartbeat.
+test('watchdog restarts a frozen menu bar app once, but not a healthy one, an open menu or a Mac waking from sleep (2.3.4)',()=>{
+ const {watchHost}=require('./backend');
+ const sim=beat=>{let t=0;const r={killed:null,opened:null,t:()=>t};
+  const w=watchHost({beatFile:'x',hostPid:42,appPath:'/Applications/Usage Together.app',now:()=>t,readBeat:()=>beat(t),
+   kill:p=>{r.killed=p;},open:p=>{r.opened=p;},schedule:()=>0,later:f=>f()});
+  r.step=dt=>{t+=dt;return w.check();};return r;};
+ let s=sim(t=>({at:t-(t%3000),menu:0}));for(let i=0;i<1440;i++)assert.equal(s.step(5000),false);assert.equal(s.killed,null);
+ s=sim(t=>({at:Math.min(t,600000),menu:0}));let fired=null;for(let i=0;i<400&&fired===null;i++)if(s.step(5000))fired=s.t();
+ assert.ok(fired-600000>=60000&&fired-600000<=65000);assert.equal(s.killed,42);assert.equal(s.opened,'/Applications/Usage Together.app');
+ assert.equal(s.step(5000),false,'fires only once');
+ s=sim(()=>({at:0,menu:1}));for(let i=0;i<300;i++)assert.equal(s.step(5000),false,'menu open 25 min is not a freeze');
+ // asleep for 2 hours, then the app resumes beating within a few seconds of waking
+ let t0=0;const w=watchHost({beatFile:'x',hostPid:1,appPath:'/A.app',now:()=>t0,readBeat:()=>({at:t0<600000?t0:t0<7804000?600000:t0,menu:0}),
+  kill:()=>assert.fail('killed after sleep'),open:()=>{},schedule:()=>0,later:()=>{}});
+ while(t0<600000){t0+=5000;w.check();}t0=7805000;for(let i=0;i<100;i++){assert.equal(w.check(),false);t0+=5000;}
+});
+test('native backend writes a fresh status file for the menu bar and removes it on exit (2.3.4)',async()=>{
+ const {spawn}=require('node:child_process');
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'ut-status-'));const status=path.join(dir,'s.json'),url=path.join(dir,'u.url');
+ const child=spawn(process.execPath,[path.join(__dirname,'backend.js'),'--demo','--native-host','--host-pid','1','--url-file',url,'--status-file',status,'--beat-file',path.join(dir,'b')],
+  {stdio:['pipe','ignore','ignore'],env:{...process.env,USAGE_DATA_DIR:dir}});
+ try{
+  const read=()=>{try{return JSON.parse(fs.readFileSync(status,'utf8'));}catch{return null;}};
+  let first=null;for(let i=0;i<100&&!first;i++){await new Promise(r=>setTimeout(r,50));first=read();}
+  assert.ok(first,'status file written');assert.equal(first.state.gpt.summary.session.remaining,76);assert.equal(first.state.claude.summary.session.remaining,54);
+  await new Promise(r=>setTimeout(r,2300));assert.ok(read().at>first.at,'status file keeps updating');
+ }finally{const gone=new Promise(r=>child.once('exit',r));child.stdin.end();await gone;}
+ assert.equal(fs.existsSync(status),false);assert.equal(fs.existsSync(url),false);
+ fs.rmSync(dir,{recursive:true,force:true});
+});

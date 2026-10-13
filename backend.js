@@ -10,7 +10,7 @@ const {spawn, execFile} = require('node:child_process');
 const {promisify} = require('node:util');
 const exec = promisify(execFile);
 const NOW = () => Date.now() / 1000;
-const VERSION='2.3.3';
+const VERSION='2.3.4';
 const INTERVAL = 300;            // usage refresh, seconds
 const TIBO_INTERVAL = 600;       // Tibo check, seconds
 const HOUR = 3600, DAY = 86400;
@@ -488,7 +488,8 @@ async function startServer(options={}) {
   function writeJSON(file,value){if(demo)return;try{fs.mkdirSync(dataDir,{recursive:true,mode:0o700});
     fs.writeFileSync(file+'.tmp',JSON.stringify(value),{mode:0o600});fs.renameSync(file+'.tmp',file);}catch{}}
   const save=()=>writeJSON(cacheFile,state),saveReminders=()=>writeJSON(reminderFile,reminders);
-  function notify(n){notifications.push({...n,at:NOW()});if(notifications.length>20)notifications.shift();}
+  function notify(n){notifications.push({...n,at:NOW()});if(notifications.length>20)notifications.shift();
+    if(options.onNotify)try{options.onNotify(n);}catch{}}
   function checkReminders(){
     const n=NOW();let changed=false;
     for(const [id,name] of [['gpt','GPT / Codex'],['claude','Claude']]){
@@ -542,6 +543,13 @@ async function startServer(options={}) {
       if(list.length)out.push({kind:'credit',provider:id,count:list.length,expiresAt:list[0].expiresAt});}
     return out;
   }
+  // Only what the menu bar needs, kept small: the native app reads it from a file every few seconds.
+  function nativeBrief(){
+    const brief=id=>{const p=state[id]||{},s=summarize(id,p).session;
+      return {fetchedAt:p.fetchedAt??null,error:p.error??null,summary:{session:s?{remaining:s.remaining,resetsAt:s.resetsAt}:null}};};
+    const marks=alerts().map(a=>({kind:a.kind,warning:a.warning,title:a.title}));
+    return {state:{gpt:brief('gpt'),claude:brief('claude')},alerts:marks};
+  }
   const key=crypto.randomBytes(24).toString('hex');const prefix='/'+key+'/';
   const html=fs.readFileSync(path.join(__dirname,'index.html'));
   let requestedAction=null;const nativeStatus={visible:null,compact:null,events:[]};
@@ -579,11 +587,7 @@ async function startServer(options={}) {
       json({ok:true});if(action==='quit' && options.onQuit){setTimeout(options.onQuit,80);return;}requestedAction=action;return;
     }
     if(req.method==='GET' && route==='native'){const action=requestedAction;requestedAction=null;
-      // Only what the menu bar needs: the native host parses this on the main thread, so keep it small.
-      const brief=id=>{const p=state[id]||{},s=summarize(id,p).session;
-        return {fetchedAt:p.fetchedAt??null,error:p.error??null,summary:{session:s?{remaining:s.remaining,resetsAt:s.resetsAt}:null}};};
-      const marks=alerts().map(a=>({kind:a.kind,warning:a.warning,title:a.title}));
-      json({action,state:{gpt:brief('gpt'),claude:brief('claude')},alerts:marks,notifications:notifications.splice(0)});return;}
+      json({action,...nativeBrief(),notifications:options.onNotify?[]:notifications.splice(0)});return;}
     const allowed={'': ['text/html',html],'ui.js':['text/javascript',null],'style.css':['text/css',null]};
     if(req.method==='GET' && Object.hasOwn(allowed,route)) {const [mime,data]=allowed[route];res.setHeader('Content-Type',mime);res.end(data || fs.readFileSync(path.join(__dirname,route)));return;}
     res.writeHead(404);res.end();
@@ -594,7 +598,17 @@ async function startServer(options={}) {
   const stop=()=>{stopping=true;clearInterval(timer);stopChildren();server.close();};
   if(options.autoRefresh!==false)refresh(true);
   if(demo)checkReminders();
-  return {url,state,refresh,update,checkTibo,server,stop};
+  return {url,state,refresh,update,checkTibo,server,stop,nativeBrief};
+}
+// System notification, shown by a short-lived helper process.
+function showNotification(n){
+  try{
+    const child=spawn('/usr/bin/osascript',['-e','on run argv','-e',
+      'display notification (item 1 of argv) with title (item 2 of argv) subtitle (item 3 of argv) sound name "Glass"','-e','end run',
+      String(n.body||''),String(n.title||'用量伴侣'),String(n.subtitle||'')],{stdio:'ignore'});
+    children.add(child);const t=setTimeout(()=>child.kill('SIGKILL'),15000);
+    const done=()=>{clearTimeout(t);children.delete(child);};child.on('exit',done);child.on('error',done);
+  }catch{}
 }
 function friendlyCodexError(error){const s=String(error.message || '');
   if(/auth|login|sign.?in|credential|unauthor|401|not logged/i.test(s))return 'Codex 尚未登录或登录已过期。请在 ChatGPT/Codex 中登录，然后刷新。';
@@ -607,28 +621,66 @@ function friendlyCodexError(error){const s=String(error.message || '');
 module.exports={percent,epoch,duration,normalizeCodex,normalizeClaude,extractToken,extractOAuth,RPC,fetchCodex,fetchClaude,startServer,demoState,
   summarize,expiringCredits,parseRss,parseSyndication,isResetPost,resetPhase,selectTiboPost,activeTiboAlert,tiboMessage,fetchTiboPosts,
   weeklyObservation,weeklyWasReset,observeWeeklyReset,latchResetPost,decryptCookie,claudeCredits};
+// Watchdog for the menu bar app. The app rewrites beatFile every 3 s. If it stops for 60 s while this Mac is awake,
+// the app's main thread is frozen (no clicks, no window). Then force-quit it and open a fresh copy, so the user
+// never has to quit and reopen it by hand. While its menu is open the app is only waiting for the user, so wait longer.
+function watchHost({beatFile,hostPid,appPath,onRelaunch,now=()=>Date.now(),readBeat=()=>JSON.parse(fs.readFileSync(beatFile,'utf8')),
+  kill=pid=>process.kill(pid,'SIGKILL'),open=p=>spawn('/usr/bin/open',['-n',p],{detached:true,stdio:'ignore'}).unref(),
+  every=5000,limit=60000,menuLimit=30*60000,schedule=setInterval,later=setTimeout}={}){
+  let lastCheck=now(),graceUntil=now()+limit,fired=false;
+  function check(){
+    if(fired)return false;
+    const t=now();
+    // This check itself ran late: the Mac was asleep. Give the app time to wake up too.
+    if(t-lastCheck>3*every)graceUntil=t+limit;
+    lastCheck=t;
+    let beat=null;try{beat=readBeat();}catch{return false;}
+    if(!beat || typeof beat.at!=='number')return false;
+    if(t<graceUntil || t-beat.at<(beat.menu?menuLimit:limit))return false;
+    fired=true;
+    try{onRelaunch?.();}catch{}
+    try{kill(hostPid);}catch{}
+    later(()=>{if(appPath && /\.app$/.test(appPath))try{open(appPath);}catch{}},800);
+    return true;
+  }
+  const timer=schedule(check,every);
+  return {check,timer,get fired(){return fired;}};
+}
+module.exports.watchHost=watchHost;
 if(require.main===module){
-let application;
+let application,relaunching=false;
+const arg=name=>{const i=process.argv.indexOf(name);return i>=0?process.argv[i+1]:null;};
+const nativeHost=process.argv.includes('--native-host');
+const hostPid=Number(arg('--host-pid'));
+const ownHost=nativeHost && Number.isInteger(hostPid) && hostPid>1 && hostPid===process.ppid;
 const closeApplication=()=>{
   application?.stop();
-  const hostIndex=process.argv.indexOf('--host-pid');
-  const hostPid=hostIndex>=0?Number(process.argv[hostIndex+1]):null;
-  if(process.argv.includes('--native-host') && Number.isInteger(hostPid) && hostPid>1 && hostPid===process.ppid){
-    try{process.kill(hostPid,'SIGTERM');}catch{}
-  }
+  if(ownHost){try{process.kill(hostPid,'SIGTERM');}catch{}}
   process.exit(0);
 };
-startServer({onQuit:closeApplication}).then(app=>{
+startServer({onQuit:closeApplication,onNotify:nativeHost?showNotification:null}).then(app=>{
   application=app;
   // The window host reads the address from this file with a time limit, so it can never hang waiting for it.
-  const urlIndex=process.argv.indexOf('--url-file');
-  const urlFile=urlIndex>=0?process.argv[urlIndex+1]:null;
+  const urlFile=arg('--url-file'),statusFile=arg('--status-file'),beatFile=arg('--beat-file');
   if(urlFile){try{fs.writeFileSync(urlFile+'.tmp',app.url+'\n',{mode:0o600});fs.renameSync(urlFile+'.tmp',urlFile);}catch{}
     process.on('exit',()=>{try{fs.rmSync(urlFile,{force:true});}catch{}});}
+  // Menu bar numbers + a heartbeat for the app, rewritten every 2 s. The app reads this file instead of calling the service.
+  if(statusFile){
+    const writeStatus=()=>{try{fs.writeFileSync(statusFile+'.tmp',JSON.stringify({at:Date.now(),...app.nativeBrief()}),{mode:0o600});
+      fs.renameSync(statusFile+'.tmp',statusFile);}catch{}};
+    writeStatus();setInterval(writeStatus,2000);
+    process.on('exit',()=>{try{fs.rmSync(statusFile,{force:true});fs.rmSync(statusFile+'.tmp',{force:true});}catch{}});
+  }
+  if(beatFile && ownHost)watchHost({beatFile,hostPid,appPath:path.resolve(__dirname,'..','..'),onRelaunch:()=>{
+    relaunching=true;app.stop();try{fs.rmSync(beatFile,{force:true});}catch{}
+    // leave once the fresh copy has been asked to open
+    setTimeout(()=>process.exit(0),3000);
+  }});
   process.stdout.write(app.url+'\n');
     // after the address is handed over, nothing more is written to the parent's pipe (a full pipe would stall the service)
     process.stdout.write=()=>true;process.stderr.write=()=>true;process.removeAllListeners('warning');process.on('warning',()=>{});
-  if(process.argv.includes('--native-host')){process.stdin.resume();process.stdin.on('end',()=>{app.stop();process.exit(0);});}
+  // The app closed its end of the pipe (it quit or crashed). During a watchdog restart, finish opening the new copy first.
+  if(nativeHost){process.stdin.resume();process.stdin.on('end',()=>{if(relaunching)return;app.stop();process.exit(0);});}
   process.on('SIGTERM',()=>{app.stop();process.exit(0);});process.on('SIGINT',()=>{app.stop();process.exit(0);});
 }).catch(()=>{process.stderr.write('无法启动本地用量服务。\n');process.exit(1);});
 
