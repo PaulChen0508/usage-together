@@ -128,3 +128,19 @@ test('persistent notification survives acknowledgement, source failure and resta
   fail=false;await app.checkTibo(true);assert.equal((await state()).alerts.length,0);assert.equal((await notifications()).length,0);
  }finally{app?.stop();mock.restoreAll();if(old===undefined)delete process.env.USAGE_DATA_DIR;else process.env.USAGE_DATA_DIR=old;fs.rmSync(dir,{recursive:true,force:true});}
 });
+
+test('a saved reset warning stays a Tibo warning, never a reset-credit card (2.3.3 fix)',async()=>{
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'usage-together-kind-'));
+ const old=process.env.USAGE_DATA_DIR;process.env.USAGE_DATA_DIR=dir;let app;
+ try{
+  // Saved by 2.3.2: the pending warning still carries the post's own kind ('rss').
+  fs.writeFileSync(path.join(dir,'tibo.json'),JSON.stringify({pendingReset:{...post('Resetting Codex rate limits for everyone today.'),phase:'upcoming',at:Date.now()/1000-600}}));
+  app=await startServer({autoRefresh:false});
+  const alerts=(await (await fetch(app.url+'state')).json()).alerts;
+  assert.equal(alerts.length,1);assert.equal(alerts[0].kind,'tibo');assert.equal(alerts[0].warning,true);
+  const native=(await (await fetch(app.url+'native')).json()).alerts;
+  assert.deepEqual(native.map(a=>a.kind),['tibo']);
+  const tibo={};latchResetPost(tibo,{...post('Resetting Codex rate limits for everyone today.'),phase:'upcoming'},null);
+  assert.equal('kind' in tibo.pendingReset,false);
+ }finally{app?.stop();if(old===undefined)delete process.env.USAGE_DATA_DIR;else process.env.USAGE_DATA_DIR=old;fs.rmSync(dir,{recursive:true,force:true});}
+});

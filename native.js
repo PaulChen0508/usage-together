@@ -4,6 +4,11 @@ ObjC.import('WebKit');
 ObjC.import('Foundation');
 ObjC.import('stdlib');
 var panel, web, status, controller, task, serviceInputPipe, compact = false, baseURL, closing = false, lastFit = 0, lastTitle = '', lastTip = '', scriptApp = null, statusMenu = null, failures = 0, resourcesPath = null, pendingMenu = false, lastClick = 0, clickWindow = 0.35;
+// Page health: the page reports 'alive' after each good update. If it goes quiet, the page is reloaded or the service restarted.
+var lastAlive = 0, showAt = 0, lastRecover = 0, activity = null;
+// How often (seconds) the menu bar asks the local service for new numbers. Each ask runs on the main thread, so keep it rare.
+var TICK = 3;
+var VALID_URL = /^http:\/\/127\.0\.0\.1:\d+\/[a-f0-9]{48}\/$/;
 // CanJoinAllSpaces | Stationary | IgnoresCycle | FullScreenAuxiliary:
 // the window is on every desktop and over full-screen apps, so it stays put whatever app or desktop you switch to.
 var SPACE_BEHAVIOR = (1 << 0) | (1 << 4) | (1 << 6) | (1 << 8);
@@ -12,15 +17,18 @@ var STRIP = 12;
 // Everything inside the window is drawn at this scale, so text and numbers shrink in proportion.
 var ZOOM = 0.85;
 function post(route) {
+  if(!baseURL)return;
   const request=$.NSMutableURLRequest.requestWithURL($.NSURL.URLWithString(baseURL+route));
   request.HTTPMethod='POST';
-  request.timeoutInterval=1;
+  request.timeoutInterval=0.5;
   $.NSURLConnection.sendSynchronousRequestReturningResponseError(request,null,null);
 }
 // Every call to the local service has a short time limit, so a slow or stuck service can never freeze the menu bar or the window.
+// The service is on this Mac and normally answers in a few milliseconds.
 function getText(route,timeout){
+  if(!baseURL)return null;
   const request=$.NSMutableURLRequest.requestWithURL($.NSURL.URLWithString(baseURL+route));
-  request.timeoutInterval=timeout||1.5;
+  request.timeoutInterval=timeout||0.6;
   const data=$.NSURLConnection.sendSynchronousRequestReturningResponseError(request,null,null);
   if(!data || data.isNil())return null;
   return ObjC.unwrap($.NSString.alloc.initWithDataEncoding(data,$.NSUTF8StringEncoding));
@@ -48,12 +56,43 @@ function fit(height){
   let y=top-newHeight; if(y<Number(vis.origin.y))y=Number(vis.origin.y);
   panel.setFrameDisplay($.NSMakeRect(Number(f.origin.x),y,Number(f.size.width),newHeight),true);
 }
+// If the saved position is on a screen that is no longer there (monitor unplugged, resolution changed),
+// the window would "open" where nobody can see it. Move it back to the top-right of the main screen.
+function ensureOnScreen(){
+  try{
+    const f=panel.frame, w=Number(f.size.width), h=Number(f.size.height);
+    const cx=Number(f.origin.x)+w/2, top=Number(f.origin.y)+h-6;
+    const screens=$.NSScreen.screens, n=Number(screens.count);
+    for(let i=0;i<n;i++){
+      const s=screens.objectAtIndex(i).frame, x=Number(s.origin.x), y=Number(s.origin.y);
+      if(cx>=x && cx<=x+Number(s.size.width) && top>=y && top<=y+Number(s.size.height))return;
+    }
+    const v=screenFrame();
+    panel.setFrameDisplay($.NSMakeRect(Number(v.origin.x)+Number(v.size.width)-w-16,Number(v.origin.y)+Number(v.size.height)-h-8,w,h),true);
+  }catch(e){}
+}
+function reloadPage(){
+  if(!web || !baseURL)return;
+  lastAlive=Date.now();
+  try{ web.loadRequest($.NSURLRequest.requestWithURL($.NSURL.URLWithString(baseURL))); }catch(e){}
+}
+// The page stopped reporting: restart the service if it no longer answers, otherwise just reload the page.
+function recover(){
+  if(closing)return;
+  const now=Date.now(); if(now-lastRecover<10000)return; lastRecover=now;
+  if(!task || !task.running || !getText('native',1))restartService(); else reloadPage();
+}
 // Bring the window to whichever desktop (Space) the user is on now.
 function show(){
-  try{ if(typeof log==='function')log('show() called'); }catch(e){}
-  panel.collectionBehavior=SPACE_BEHAVIOR;
-  panel.orderFrontRegardless;
-  try{ panel.makeKeyWindow; }catch(e){}
+  try{
+    ensureOnScreen();
+    panel.collectionBehavior=SPACE_BEHAVIOR;
+    panel.orderFrontRegardless;
+    try{ panel.makeKeyWindow; }catch(e){}
+    // A few seconds after opening, make sure the page inside is really working.
+    showAt=Date.now();
+    controller.performSelectorWithObjectAfterDelay('checkPage:',null,4);
+  }catch(e){}
   try{post('host/show/'+(panel.isVisible?'1':'0'));}catch(e){}
 }
 function openLink(url){ if(/^https:\/\/[^\s]+$/.test(url)) $.NSWorkspace.sharedWorkspace.openURL($.NSURL.URLWithString(url)); }
@@ -76,6 +115,8 @@ function setTheme(t){
 }
 function perform(name){
   name=String(name||'');
+  if(name==='alive'){lastAlive=Date.now();return;}
+  if(name==='stale'){recover();return;}
   if(name.indexOf('theme:')===0){setTheme(name.slice(6));return;}
   if(name.indexOf('fit:')===0){fit(Number(name.slice(4)));return;}
   if(name.indexOf('open:')===0){openLink(name.slice(5));return;}
@@ -88,6 +129,10 @@ var dbg=[];
 function log(m){return;try{dbg.push(new Date().toISOString().slice(11,23)+' '+m);dbg=dbg.slice(-40);
   $(dbg.join('\n')).writeToFileAtomicallyEncodingError('/Applications/_to_delete/ut-click.log',true,$.NSUTF8StringEncoding,null);}catch(e){}}
 function handleClick(ev,right){
+  // An error here must never escape into AppKit; a failed click just does nothing.
+  try{ handleClickInner(ev,right); }catch(e){ pendingMenu=false; }
+}
+function handleClickInner(ev,right){
   let count=1; try{count=Number(ev.clickCount)||1;}catch(e){}
   const now=Date.now();
   log('click count='+count+' right='+right+' pending='+pendingMenu+' gap='+(now-lastClick));
@@ -115,20 +160,31 @@ function openMenu(){
   try{ status.button.highlight(false); }catch(e){}
 }
 function startService(){
-  const resources=resourcesPath;
+  const resources=resourcesPath, fm=$.NSFileManager.defaultManager;
+  const pid=String($.NSProcessInfo.processInfo.processIdentifier);
+  // The service writes its address to this private temp file. Waiting for the file has a time limit;
+  // the old way (a blocking read of the service's output) could freeze the whole app if the service never answered.
+  const urlFile=ObjC.unwrap($.NSTemporaryDirectory().stringByAppendingPathComponent('usage-together-'+pid+'.url'));
+  try{ fm.removeItemAtPathError(urlFile,null); }catch(e){}
   task=$.NSTask.alloc.init;
   task.launchPath=resources+'/runtime/node';
-  task.arguments=[resources+'/backend.js','--native-host','--host-pid',String($.NSProcessInfo.processInfo.processIdentifier)];
+  const args=[resources+'/backend.js'];
+  if(fm.fileExistsAtPath(resources+'/DEMO'))args.push('--demo');
+  args.push('--native-host','--host-pid',pid,'--url-file',urlFile);
+  task.arguments=args;
   serviceInputPipe=$.NSPipe.alloc.init;
   task.standardInput=serviceInputPipe.fileHandleForReading;
-  const demo=$.NSFileManager.defaultManager.fileExistsAtPath(resources+'/DEMO');
-  if(demo)task.arguments=[resources+'/backend.js','--demo','--native-host','--host-pid',String($.NSProcessInfo.processInfo.processIdentifier)];
-  const pipe=$.NSPipe.alloc.init; task.standardOutput=pipe;
+  task.standardOutput=$.NSFileHandle.fileHandleWithNullDevice;
   task.standardError=$.NSFileHandle.fileHandleWithNullDevice;
+  baseURL='';
   task.launch;
-  const ready=pipe.fileHandleForReading.availableData;
-  baseURL=ObjC.unwrap($.NSString.alloc.initWithDataEncoding(ready,$.NSUTF8StringEncoding)).trim();
-  if(!baseURL)throw Error('服务未启动');
+  for(let i=0;i<200 && !baseURL;i++){
+    const s=$.NSString.stringWithContentsOfFileEncodingError(urlFile,$.NSUTF8StringEncoding,null);
+    if(s && !s.isNil()){ const u=ObjC.unwrap(s).trim(); if(VALID_URL.test(u)){ baseURL=u; break; } }
+    if(!task.running)break;
+    $.NSThread.sleepForTimeInterval(0.05);
+  }
+  if(!baseURL){ try{ if(task.running)task.terminate; }catch(e){} throw Error('服务未启动'); }
 }
 // The service stopped or stopped answering: start a fresh one and reload the window.
 function restartService(){
@@ -136,12 +192,13 @@ function restartService(){
   failures=0;
   try{ if(task && task.running){ const pid=String(task.processIdentifier); task.terminate;
     const k=$.NSTask.alloc.init; k.launchPath='/bin/kill'; k.arguments=['-9',pid]; k.launch; } }catch(e){}
+  lastRecover=Date.now();
   try{ startService(); }catch(e){ return; }
-  try{ web.loadRequest($.NSURLRequest.requestWithURL($.NSURL.URLWithString(baseURL))); }catch(e){}
+  reloadPage();
 }
 function stopService(){closing=true;if(task && task.running)task.terminate;}
 function quit(){if(closing)return;closing=true;try{post('action/quit');}catch(e){}if(task && task.running)task.terminate;$.exit(0);}
-function idle(){if(controller && !closing)controller.tick(null);return 1;}
+function idle(){try{if(controller && !closing)controller.tick(null);}catch(e){}return TICK;}
 function reopen(){if(panel)show();}
 ObjC.registerSubclass({name:'UTClickView',superclass:'NSView',methods:{
  'mouseDown:':{types:['void',['id']],implementation:function(ev){
@@ -152,6 +209,14 @@ ObjC.registerSubclass({name:'UTClickView',superclass:'NSView',methods:{
  'acceptsFirstMouse:':{types:['bool',['id']],implementation:function(){return true;}}
 }});
 ObjC.registerSubclass({name:'UsageTogetherController',superclass:'NSObject',protocols:['NSWindowDelegate','NSMenuDelegate'],methods:{
+ // The page's web process can be shut down by macOS (memory pressure, sleep). Without this the window stays blank forever.
+ 'webViewWebContentProcessDidTerminate:':{types:['void',['id']],implementation:function(){ try{ reloadPage(); }catch(e){} }},
+ // The page could not load (for example while the service was restarting): try again shortly.
+ 'webView:didFailProvisionalNavigation:withError:':{types:['void',['id','id','id']],implementation:function(){
+   try{ controller.performSelectorWithObjectAfterDelay('reloadPage:',null,3); }catch(e){} }},
+ 'reloadPage:':{types:['void',['id']],implementation:function(){ try{ reloadPage(); }catch(e){} }},
+ 'checkPage:':{types:['void',['id']],implementation:function(){
+   try{ if(!closing && panel.isVisible && lastAlive<showAt)recover(); }catch(e){} }},
  // Menu bar title: one click opens the menu (after waiting to see if a second click comes), double click opens the window.
  'showMenu:':{types:['void',['id']],implementation:function(){ if(!pendingMenu)return; pendingMenu=false; openMenu(); }},
  'menuDidClose:':{types:['void',['id']],implementation:function(){ try{ status.menu=null; }catch(e){} }},
@@ -169,9 +234,11 @@ ObjC.registerSubclass({name:'UsageTogetherController',superclass:'NSObject',prot
    if(closing)return;
    try{
      if(task && !task.running){restartService();return;}
-     const text=getText('native',1.5);
-     if(!text){ if(++failures>=20)restartService(); return; }
+     const text=getText('native');
+     if(!text){ if(++failures>=5)restartService(); return; }
      failures=0;
+     // Window open but the page has gone quiet for 30 s: bring it back.
+     if(panel.isVisible && Date.now()-lastAlive>30000)recover();
      const snapshot=JSON.parse(text);
      const alerts=snapshot.alerts||[];
      const tibo=alerts.some(a=>a.kind==='tibo' && a.warning!==false), credit=alerts.some(a=>a.kind==='credit');
@@ -193,9 +260,12 @@ function run(argv) {
     resourcesPath=argv[0]==='--resources'?argv[1]:ObjC.unwrap($.NSBundle.mainBundle.resourcePath);
     startService();
   }
-  if(!/^http:\/\/127\.0\.0\.1:\d+\/[a-f0-9]{48}\/$/.test(baseURL))throw new Error('Invalid local service');
+  if(!VALID_URL.test(baseURL))throw new Error('Invalid local service');
   const app=$.NSApplication.sharedApplication;
   app.setActivationPolicy($.NSApplicationActivationPolicyAccessory);
+  // Keep macOS from putting the app to sleep (App Nap) while it sits in the menu bar, which made it slow to respond
+  // after a while. The Mac itself can still sleep normally.
+  try{ activity=$.NSProcessInfo.processInfo.beginActivityWithOptionsReason(0x00EFFFFF,'用量伴侣在菜单栏显示额度'); }catch(e){}
   controller=$.UsageTogetherController.alloc.init;
   const primary=$.NSScreen.mainScreen;
   const screen=primary && !primary.isNil() ? primary.visibleFrame : $.NSMakeRect(0,0,1440,900);
@@ -233,7 +303,8 @@ function run(argv) {
   web.autoresizingMask=$.NSViewWidthSizable|$.NSViewHeightSizable;
   try{ web.setValueForKey($.NSNumber.numberWithBool(false),'drawsBackground'); }catch(e){}
   try{ web.underPageBackgroundColor=$.NSColor.clearColor; }catch(e){}
-  web.loadRequest($.NSURLRequest.requestWithURL($.NSURL.URLWithString(baseURL)));
+  web.navigationDelegate=controller;
+  reloadPage();
   glass.addSubview(web);
   // Size the page from the window's real size (it may have been restored from last time), so nothing is cut off.
   const b=glass.bounds;

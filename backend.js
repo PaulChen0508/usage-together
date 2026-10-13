@@ -10,7 +10,7 @@ const {spawn, execFile} = require('node:child_process');
 const {promisify} = require('node:util');
 const exec = promisify(execFile);
 const NOW = () => Date.now() / 1000;
-const VERSION='2.3.2';
+const VERSION='2.3.3';
 const INTERVAL = 300;            // usage refresh, seconds
 const TIBO_INTERVAL = 600;       // Tibo check, seconds
 const HOUR = 3600, DAY = 86400;
@@ -391,10 +391,11 @@ function observeWeeklyReset(tibo,gpt,n=NOW()){
 function latchResetPost(tibo,hit,gpt,n=NOW()){
   if(!hit || !['upcoming','announcement'].includes(hit.phase) || hit.at<=(tibo.resolvedThroughAt||0))return;
   if(tibo.pendingReset){
-    if(hit.at>tibo.pendingReset.at)tibo.pendingReset={...tibo.pendingReset,...hit,text:hit.text.slice(0,400)};
+    if(hit.at>tibo.pendingReset.at){const {kind,...post}=hit;tibo.pendingReset={...tibo.pendingReset,...post,text:hit.text.slice(0,400)};}
     return;
   }
-  tibo.pendingReset={...hit,text:hit.text.slice(0,400),firstDetectedAt:n,weeklyBefore:weeklyObservation(gpt,n)};
+  const {kind,...post}=hit;
+  tibo.pendingReset={...post,text:hit.text.slice(0,400),firstDetectedAt:n,weeklyBefore:weeklyObservation(gpt,n)};
 }
 function selectTiboPost(posts,n=NOW()){
   return posts.map(p=>({...p,phase:resetPhase(p)})).filter(p=>p.phase && p.at && p.at<=n+600 && n-p.at<(p.window||DAY))
@@ -534,7 +535,9 @@ async function startServer(options={}) {
   function alerts(){
     const out=[];const n=NOW();
     const a=activeTiboAlert(tibo,n);
-    if(a && (a.persistent || !reminders.tiboDismissed.includes(a.id)))out.push({kind:'tibo',...a,warning:!!a.persistent,title:tiboMessage(a).title});
+    // kind goes last: the saved post carries its own kind ('rss'/'tweet'), which must not replace 'tibo',
+    // or the window draws this warning as a reset-credit card ("Claude 有 undefined 张重置券").
+    if(a && (a.persistent || !reminders.tiboDismissed.includes(a.id)))out.push({...a,kind:'tibo',warning:!!a.persistent,title:tiboMessage(a).title});
     for(const id of ['gpt','claude']){const list=expiringCredits(state[id],n);
       if(list.length)out.push({kind:'credit',provider:id,count:list.length,expiresAt:list[0].expiresAt});}
     return out;
@@ -576,7 +579,11 @@ async function startServer(options={}) {
       json({ok:true});if(action==='quit' && options.onQuit){setTimeout(options.onQuit,80);return;}requestedAction=action;return;
     }
     if(req.method==='GET' && route==='native'){const action=requestedAction;requestedAction=null;
-      json({action,state:{gpt:view('gpt'),claude:view('claude')},refreshing:[...busy],alerts:alerts(),notifications:notifications.splice(0)});return;}
+      // Only what the menu bar needs: the native host parses this on the main thread, so keep it small.
+      const brief=id=>{const p=state[id]||{},s=summarize(id,p).session;
+        return {fetchedAt:p.fetchedAt??null,error:p.error??null,summary:{session:s?{remaining:s.remaining,resetsAt:s.resetsAt}:null}};};
+      const marks=alerts().map(a=>({kind:a.kind,warning:a.warning,title:a.title}));
+      json({action,state:{gpt:brief('gpt'),claude:brief('claude')},alerts:marks,notifications:notifications.splice(0)});return;}
     const allowed={'': ['text/html',html],'ui.js':['text/javascript',null],'style.css':['text/css',null]};
     if(req.method==='GET' && Object.hasOwn(allowed,route)) {const [mime,data]=allowed[route];res.setHeader('Content-Type',mime);res.end(data || fs.readFileSync(path.join(__dirname,route)));return;}
     res.writeHead(404);res.end();
@@ -613,6 +620,11 @@ const closeApplication=()=>{
 };
 startServer({onQuit:closeApplication}).then(app=>{
   application=app;
+  // The window host reads the address from this file with a time limit, so it can never hang waiting for it.
+  const urlIndex=process.argv.indexOf('--url-file');
+  const urlFile=urlIndex>=0?process.argv[urlIndex+1]:null;
+  if(urlFile){try{fs.writeFileSync(urlFile+'.tmp',app.url+'\n',{mode:0o600});fs.renameSync(urlFile+'.tmp',urlFile);}catch{}
+    process.on('exit',()=>{try{fs.rmSync(urlFile,{force:true});}catch{}});}
   process.stdout.write(app.url+'\n');
     // after the address is handed over, nothing more is written to the parent's pipe (a full pipe would stall the service)
     process.stdout.write=()=>true;process.stderr.write=()=>true;process.removeAllListeners('warning');process.on('warning',()=>{});

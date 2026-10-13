@@ -46,14 +46,21 @@ function card(id,p){const isGPT=id==='gpt',s=p.summary||{},old=isOld(p),busy=sta
   ${status?`<p class="health ${p.error?'bad':''}">${esc(status)}${p.fetchedAt&&status?' · '+esc(short(p.fetchedAt)):''}</p>`:''}
   ${more(id,p,s.others||[])}
  </section>`;}
-function alertsHTML(list){return list.map(a=>a.kind==='tibo'
+// Only real Tibo warnings and real reset-credit reminders are drawn; anything else is skipped instead of being shown as a credit card.
+function alertsHTML(list){return list.filter(a=>a.kind==='tibo' || (a.kind==='credit' && typeof a.count==='number' && a.count>0 && a.expiresAt)).map(a=>a.kind==='tibo'
  ?`<div class="alert tibo" role="alert" title="${esc(a.text)}"><span class="alert-icon" aria-hidden="true">${a.warning===false?'ℹ':'⚠︎'}</span><div class="alert-body"><b>${esc(a.title||'Tibo：额度重置消息')}</b><p class="alert-text">${esc(a.text)}</p>${a.persistent?'<p class="alert-text">警告保留至 GPT 每周额度实际重置。</p>':a.phase==='upcoming'?'<p class="alert-text">可在重置前使用剩余额度。</p>':''}<div class="alert-actions"><span>${esc(short(a.at))}</span>${a.url?`<button data-open="${esc(a.url)}">原帖</button>`:''}${a.persistent?'<span>持续提醒</span>':`<button data-dismiss="${esc(a.id)}">知道了</button>`}</div></div></div>`
  :`<div class="alert credit" role="alert"><span class="alert-icon" aria-hidden="true">⏰</span><div class="alert-body"><b>${a.provider==='gpt'?'GPT':'Claude'} 有 ${a.count} 张重置券快到期</b><div class="alert-actions"><span>还剩 <span class="countdown" data-reset="${a.expiresAt}">${esc(countdown(a.expiresAt))}</span>（${esc(short(a.expiresAt))}）</span></div></div></div>`).join('');}
 function clocks(){document.querySelectorAll('[data-reset]').forEach(el=>{const t=Number(el.dataset.reset);if(t)el.textContent=countdown(t);});}
 function fit(){const h=host();if(!h)return;let height=Math.ceil(document.body.getBoundingClientRect().height);
  if($('helpDialog').open)height=Math.max(height,520);
  if(Math.abs(height-lastFit)>2){lastFit=height;h.postMessage('fit:'+height);}}
-async function load(){try{const r=await fetch('state');if(!r.ok)throw Error();const s=await r.json();
+// Every request has a time limit, and only one state request runs at a time, so stuck requests never pile up.
+function timed(url,opts={},ms=5000){const c=new AbortController();const t=setTimeout(()=>c.abort(),ms);
+ return fetch(url,{...opts,signal:c.signal}).finally(()=>clearTimeout(t));}
+let loading=false,misses=0;
+async function load(){if(loading)return;loading=true;try{await loadOnce();}finally{loading=false;}}
+async function loadOnce(){try{const r=await timed('state');if(!r.ok)throw Error();const s=await r.json();
+ misses=0;if(host())host().postMessage('alive');
  state={...s,refreshing:s.refreshing||[]};
  const key=JSON.stringify([s.gpt,s.claude,s.refreshing,isOld(s.gpt),isOld(s.claude)]);
  if(key!==signature){const opened=[...document.querySelectorAll('.provider details[open]')].map(d=>d.closest('.provider').classList[1]+'|'+d.className);
@@ -72,7 +79,9 @@ async function load(){try{const r=await fetch('state');if(!r.ok)throw Error();co
  el.title=t.ok===false?`未能读取 Tibo 原帖，无法确认是否有新重置消息。${t.lastSuccessAt?'上次成功：'+short(t.lastSuccessAt)+'。':''}${t.error||''}`:
   `${t.source?'来源：'+t.source+'。':''}${t.latestPostAt?'最新原帖：'+short(t.latestPostAt)+'。':''}每 10 分钟检查；来源可能有缓存延迟。`;
  clocks();fit();
- }catch{$('status').textContent='本地连接中断，请重新打开应用';}}
+ }catch{$('status').textContent='本地连接中断，正在自动恢复…';
+  // Tell the app after a few misses in a row; it restarts the local service or reloads this page.
+  if(++misses%3===0 && host())host().postMessage('stale');}}
 function applyTheme(t){if(t===theme)return;theme=t;document.body.classList.toggle('light',t==='light');
  $('theme').textContent=t==='light'?'☾':'☀';$('theme').title=t==='light'?'切换到深色':'切换到浅色';
  if(host())host().postMessage('theme:'+t);}
@@ -90,7 +99,7 @@ async function action(name){
 }
 $('restore').onclick=()=>action('show');
 $('hide').onclick=()=>action('hide');
-$('refresh').onclick=async()=>{$('refresh').disabled=true;$('refresh').classList.add('spin');setTimeout(()=>$('refresh').classList.remove('spin'),900);try{await fetch('refresh',{method:'POST'});await load();}catch{$('status').textContent='刷新失败，请重新打开应用';$('refresh').disabled=false;}};
+$('refresh').onclick=async()=>{$('refresh').disabled=true;$('refresh').classList.add('spin');setTimeout(()=>$('refresh').classList.remove('spin'),900);try{await timed('refresh',{method:'POST'});await load();}catch{$('status').textContent='刷新失败，请重新打开应用';$('refresh').disabled=false;}};
 $('theme').onclick=async()=>{const t=theme==='light'?'dark':'light';applyTheme(t);try{await fetch('config/theme/'+t,{method:'POST'});}catch{}};
 $('help').onclick=()=>{$('helpDialog').showModal();fit();};
 $('closeHelp').onclick=$('doneHelp').onclick=()=>{$('helpDialog').close();fit();};
