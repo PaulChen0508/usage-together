@@ -1,6 +1,6 @@
 {
   "name": "usage-together",
-  "version": "2.3.4",
+  "version": "2.3.5",
   "description": "macOS menu-bar app showing remaining Codex/ChatGPT and Claude Code usage limits side by side.",
   "private": true,
   "license": "MIT",

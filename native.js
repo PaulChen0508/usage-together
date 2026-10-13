@@ -104,9 +104,11 @@ function show(){
     panel.collectionBehavior=SPACE_BEHAVIOR;
     panel.orderFrontRegardless;
     try{ panel.makeKeyWindow; }catch(e){}
-    // A few seconds after opening, make sure the page inside is really working.
+    // If the page has been quiet for a while, load it again now; then make sure it really answered.
+    // (Do not call evaluateJavaScript here: a JXA completion handler of null crashes the whole app.)
     showAt=Date.now();
-    controller.performSelectorWithObjectAfterDelay('checkPage:',null,4);
+    if(Date.now()-lastAlive>8000)reloadPage();
+    controller.performSelectorWithObjectAfterDelay('checkPage:',null,2.5);
   }catch(e){}
 }
 function openLink(url){ if(/^https:\/\/[^\s]+$/.test(url)) $.NSWorkspace.sharedWorkspace.openURL($.NSURL.URLWithString(url)); }
@@ -130,9 +132,7 @@ function perform(name){
 }
 // Clicks on the menu bar numbers. A transparent view covers the button and receives the mouse-down itself,
 // so the click count comes straight from the event: 1 = menu (after a short wait), 2 = open the window.
-var dbg=[];
-function log(m){return;try{dbg.push(new Date().toISOString().slice(11,23)+' '+m);dbg=dbg.slice(-40);
-  $(dbg.join('\n')).writeToFileAtomicallyEncodingError('/Applications/_to_delete/ut-click.log',true,$.NSUTF8StringEncoding,null);}catch(e){}}
+function log(m){}
 function handleClick(ev,right){
   // An error here must never escape into AppKit; a failed click just does nothing.
   try{ handleClickInner(ev,right); }catch(e){ pendingMenu=false; }
@@ -144,11 +144,20 @@ function handleClickInner(ev,right){
   if(right){pendingMenu=false;openMenu();return;}
   if(count>=2 || (pendingMenu && now-lastClick<=clickWindow*1000+80)){pendingMenu=false;lastClick=0;
     // double click toggles: open the window, or put it away if it is already showing
-    let vis=false; try{vis=!!panel.isVisible;}catch(e){}
-    if(vis)perform('hide'); else show();
+    if(reallyShown())perform('hide'); else show();
     return;}
   lastClick=now;pendingMenu=true;
   controller.performSelectorWithObjectAfterDelay('showMenu:',null,clickWindow);
+}
+// "Visible" to AppKit is not always visible to the user: the window can be fully covered, on a screen that
+// was unplugged, or showing a page that never loaded. Double-click then shows it again instead of hiding it.
+function reallyShown(){
+  try{
+    if(!panel.isVisible)return false;
+    const occ=Number(panel.occlusionState); if(!(occ & (1<<1)))return false;
+    if(Date.now()-lastAlive>15000)return false;
+    return true;
+  }catch(e){ return false; }
 }
 function openMenu(){
   if(!statusMenu)return;
@@ -229,6 +238,34 @@ function startFailed(){
 function cleanupFiles(){ removeFile(statusFile); removeFile(beatFile); removeFile(urlFile); }
 function stopService(){closing=true;if(task && task.running)task.terminate;cleanupFiles();}
 function quit(){if(closing)return;closing=true;try{if(task && task.running)task.terminate;}catch(e){}cleanupFiles();$.exit(0);}
+// Only one copy may run. An older copy (even one whose app file was deleted or replaced) would keep its menu bar
+// item, and because both share one app ID, opening the app again only woke up the old, broken copy.
+function closeOtherCopies(){
+  try{
+    const me=$.NSRunningApplication.currentApplication, mine=Number(me.processIdentifier);
+    const id=me.bundleIdentifier; if(!id || id.isNil())return;
+    const list=$.NSRunningApplication.runningApplicationsWithBundleIdentifier(id);
+    for(let i=0;i<Number(list.count);i++){
+      const other=list.objectAtIndex(i), pid=Number(other.processIdentifier);
+      if(pid && pid!==mine){ try{ other.forceTerminate; }catch(e){} }
+    }
+  }catch(e){}
+}
+// If this copy's app file was deleted or replaced while it runs, start the installed copy and step aside.
+var bundleChecks=0;
+function checkBundle(){
+  if(!resourcesPath || ++bundleChecks%20)return;
+  try{
+    const fm=$.NSFileManager.defaultManager;
+    if(fm.fileExistsAtPath(resourcesPath+'/backend.js') && fm.fileExistsAtPath(resourcesPath+'/ui.js'))return;
+    const me=$.NSRunningApplication.currentApplication;
+    const url=$.NSWorkspace.sharedWorkspace.URLForApplicationWithBundleIdentifier(me.bundleIdentifier);
+    const target=(url && !url.isNil())?ObjC.unwrap(url.path):'';
+    if(!target || !fm.fileExistsAtPath(target+'/Contents/Resources/backend.js'))return;
+    const t=$.NSTask.alloc.init; t.launchPath='/usr/bin/open'; t.arguments=['-n',target]; t.launch;
+    quit();
+  }catch(e){}
+}
 function idle(){try{if(controller && !closing)controller.tick(null);}catch(e){}return TICK;}
 function reopen(){if(panel)show();}
 ObjC.registerSubclass({name:'UTClickView',superclass:'NSView',methods:{
@@ -269,6 +306,7 @@ ObjC.registerSubclass({name:'UsageTogetherController',superclass:'NSObject',prot
      if(lastTickAt && now-lastTickAt>15000)graceUntil=now+20000;
      lastTickAt=now;
      writeBeat();
+     checkBundle();
      if(starting){
        if(serviceReady()){ reloadPage(); return; }
        if(!task || !task.running || now-starting>15000)startFailed();
@@ -300,6 +338,7 @@ function run(argv) {
   if(argv[0] && /^http:/.test(argv[0]))baseURL=argv[0];
   else {
     resourcesPath=argv[0]==='--resources'?argv[1]:ObjC.unwrap($.NSBundle.mainBundle.resourcePath);
+    closeOtherCopies();
     startService();
   }
   if(!VALID_URL.test(baseURL))throw new Error('Invalid local service');

@@ -144,3 +144,60 @@ test('a saved reset warning stays a Tibo warning, never a reset-credit card (2.3
   assert.equal('kind' in tibo.pendingReset,false);
  }finally{app?.stop();if(old===undefined)delete process.env.USAGE_DATA_DIR;else process.env.USAGE_DATA_DIR=old;fs.rmSync(dir,{recursive:true,force:true});}
 });
+
+// 2.3.5: FxTwitter source, retries, stale sources and quick retry after a failed check.
+// Public posts only, trimmed to the fields the app reads (same shape as the real API answer).
+const {parseFx}=require('./backend');
+const fxBody=JSON.stringify({code:200,results:[
+ {type:'status',id:'2109812360596865224',url:'https://x.com/thsottiaux/status/2109812360596865224',text:'Global reset landing by EOD PST time. Enjoy',
+  author:{screen_name:'thsottiaux'},created_at:'Tue Oct 13 01:03:59 +0000 2026',created_timestamp:1791853439,reposted_by:null,
+  replying_to:{screen_name:'thsottiaux',status:'2109812216212099456'}},
+ {type:'status',id:'2109873287853707513',url:'https://x.com/thsottiaux/status/2109873287853707513',text:"What would you like with your side of reset? It's done.",
+  author:{screen_name:'thsottiaux'},created_timestamp:1791867966,reposted_by:null,quote:{text:'We will reset Codex rate limits tomorrow',author:{screen_name:'other'}}},
+ {type:'status',id:'999',url:'https://x.com/other/status/999',text:'Codex limits will reset tomorrow',author:{screen_name:'other'},created_timestamp:1791867000,
+  reposted_by:{screen_name:'thsottiaux'}}],cursor:{}});
+const fxSrc={type:'fxtwitter',name:'FxTwitter',url:'https://fx.example/statuses',attempts:4};
+const fxNow=1791860000;
+test('FxTwitter posts are parsed; reposts and quoted text are ignored',()=>{
+ const posts=parseFx(fxBody,fxSrc);
+ assert.equal(posts.length,2);
+ assert.equal(posts[0].url,'https://x.com/thsottiaux/status/2109812360596865224');
+ assert.equal(posts[0].at,1791853439);
+ assert.ok(!posts.some(p=>p.text.includes('tomorrow')));
+ const hit=selectTiboPost(posts.filter(p=>resetPhase(p)),fxNow);
+ assert.equal(hit.id,'2109812360596865224');assert.equal(hit.phase,'upcoming');
+ assert.deepEqual(parseFx('{"code":404,"results":[],"cursor":{"top":null}}',fxSrc),[]);
+ assert.deepEqual(parseFx('not json',fxSrc),[]);
+});
+test('a flaky source is retried until it answers',async()=>{
+ let calls=0;
+ const r=await fetchTiboPosts({sources:[fxSrc],retryDelay:0,requestFn:async()=>++calls<3?{status:404,body:'{"code":404,"results":[]}'}:{status:200,body:fxBody}});
+ assert.equal(calls,3);assert.equal(r.source,'FxTwitter');assert.equal(r.attempts,3);assert.equal(r.latestPostAt,1791867966);
+});
+test('a source that only returns months-old posts does not count as a successful check',async()=>{
+ const old={type:'syndication',name:'X',url:'https://x.example',maxAge:14*86400};
+ const html=`<script id="__NEXT_DATA__" type="application/json">${JSON.stringify({tweets:[{id_str:'1',full_text:'hello',created_at:'Wed Nov 19 23:45:08 +0000 2025',user:{screen_name:'thsottiaux'}}]})}</script>`;
+ await assert.rejects(fetchTiboPosts({sources:[old],retryDelay:0,now:()=>fxNow,requestFn:async()=>({status:200,body:html})}),/旧帖子/);
+ // ...and the next source is still tried
+ const r=await fetchTiboPosts({sources:[old,fxSrc],retryDelay:0,now:()=>fxNow,requestFn:async u=>u.startsWith('https://x.')?{status:200,body:html}:{status:200,body:fxBody}});
+ assert.equal(r.source,'FxTwitter');
+});
+test('a failed check is retried within minutes and only repeated failures are reported',async()=>{
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'tibo-retry-'));
+ const old=process.env.USAGE_DATA_DIR;process.env.USAGE_DATA_DIR=dir;
+ let time=fxNow*1000,fail=true,calls=0,app;
+ mock.method(Date,'now',()=>time);
+ const fetchPosts=async()=>{calls++;if(fail)throw Error('FxTwitter: HTTP 404');return {posts:parseFx(fxBody,fxSrc),source:'FxTwitter',latestPostAt:1791867966};};
+ try{
+  app=await startServer({autoRefresh:false,fetchTiboPosts:fetchPosts,fetchCodex:async()=>gpt(time/1000)});
+  const state=async()=> (await (await fetch(app.url+'state')).json()).tibo;
+  await app.checkTibo();assert.equal(calls,1);
+  let t=await state();assert.equal(t.ok,false);assert.equal(t.failStreak,1);assert.ok(t.nextCheckAt-fxNow<=130);
+  time+=60*1000;await app.checkTibo();assert.equal(calls,1,'not before the retry time');
+  time+=70*1000;await app.checkTibo();assert.equal(calls,2,'retried after about 2 minutes');
+  t=await state();assert.equal(t.failStreak,2);
+  fail=false;time+=5*60*1000;await app.checkTibo();assert.equal(calls,3);
+  t=await state();assert.equal(t.ok,true);assert.equal(t.failStreak,0);assert.equal(t.source,'FxTwitter');
+  time+=5*60*1000;await app.checkTibo();assert.equal(calls,3,'after a success, the normal 10-minute interval applies');
+ }finally{app?.stop();mock.restoreAll();if(old)process.env.USAGE_DATA_DIR=old;else delete process.env.USAGE_DATA_DIR;fs.rmSync(dir,{recursive:true,force:true});}
+});

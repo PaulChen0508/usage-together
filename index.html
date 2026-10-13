@@ -10,13 +10,13 @@
 <form id="keyForm"><input id="keyInput" type="password" autocomplete="off" spellcheck="false" placeholder="sk-ant-sid01-…"><button type="submit">保存</button><button type="button" id="keyClear">清除</button></form><p id="keyMsg" class="key-msg"></p></details>
 <p class="foot"><span id="mode"></span><span id="tibo">Tibo 动态检查中…</span></p>
 </main>
-<dialog id="helpDialog"><div class="dialog-head"><h2>关于用量伴侣 · <span id="ver">2.3.4</span></h2><button id="closeHelp" aria-label="关闭说明">×</button></div>
+<dialog id="helpDialog"><div class="dialog-head"><h2>关于用量伴侣 · <span id="ver">2.3.5</span></h2><button id="closeHelp" aria-label="关闭说明">×</button></div>
 <p>菜单栏显示 GPT 和 Claude 的 <b>5 小时剩余额度</b>（G = GPT，C = Claude，* = 旧数据）。窗口里每一边的大数字也是 5 小时剩余，下面是 5 小时刷新时间、每周剩余和每周刷新时间。GPT 的 reserved 额度不显示。</p>
 <p>Claude 的 5 小时额度从你发出第一条消息才开始计时，没用过时显示“还没开始计时”。</p>
 <p>GPT 数据来自本机已登录的 Codex / ChatGPT。Claude 会依次尝试：Claude Code 登录 → 手动填写的 sessionKey → Claude 桌面版登录。第一次读取桌面版登录时，macOS 会弹出钥匙串授权，点「始终允许」即可。</p>
 <p>第一次检测到 Tibo 的额度重置公告后，菜单栏的 ⚠︎ 和窗口警告会持续保留，直到读取到 GPT 每周额度实际重置。5 小时额度刷新、读取失败、重开软件和已读操作都不会清除警告，也不会按 EOD 或固定时长自动清除。</p>
 <p>每周额度进入新周期、已用比例归零或明显回落时，会解除警告；仍在使用额度或读取失败时继续保留。原帖读取和用量更新可能延迟，因此解除警告也可能稍晚。已完成重置和重置券消息显示为信息，每条系统通知只发送一次。</p>
-<p>每 10 分钟检查 Tibo 原帖，通过公开 X 镜像读取，失败时尝试 X 接口。来源可能有缓存延迟；读不到时会明确显示并自动重试，不能保证实时提醒。新闻搜索不作为 Tibo 原帖检查成功的依据。</p>
+<p>每 10 分钟检查 Tibo 原帖，依次尝试 FxTwitter、公开 X 镜像和 X 接口，不稳定的来源会自动多试几次；这次没读到时几分钟内就会再试，连续读不到才会提示。来源可能有缓存延迟，不能保证实时提醒。新闻搜索不作为 Tibo 原帖检查成功的依据。</p>
 <p>重置券距离到期不到 3 天时，会马上提醒一次，之后每 12 小时提醒一次，直到用掉或到期。</p>
 <p>程序只读用量，不发送聊天，不消耗重置券。</p>
 <p class="help-note">窗口在所有桌面和全屏应用上都会显示，切换应用或桌面时一直跟着你。拖动窗口最上面的细条可以移动位置。右上角 ☀ / ☾ 切换浅色和深色。双击菜单栏的用量数字打开窗口，再双击收起；单击弹出菜单；退出请用菜单栏「退出」。</p><div class="dialog-actions"><button id="quitApp">退出程序</button><button class="dialog-done" id="doneHelp">知道了</button></div></dialog>

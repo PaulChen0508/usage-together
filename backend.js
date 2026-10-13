@@ -10,9 +10,10 @@ const {spawn, execFile} = require('node:child_process');
 const {promisify} = require('node:util');
 const exec = promisify(execFile);
 const NOW = () => Date.now() / 1000;
-const VERSION='2.3.4';
+const VERSION='2.3.5';
 const INTERVAL = 300;            // usage refresh, seconds
 const TIBO_INTERVAL = 600;       // Tibo check, seconds
+const TIBO_RETRY = 120;          // first retry after a failed Tibo check, seconds (then doubles, up to TIBO_INTERVAL)
 const HOUR = 3600, DAY = 86400;
 const CREDIT_WINDOW = 3 * DAY;   // start reminding 3 days before expiry
 const CREDIT_EVERY = 12 * HOUR;  // then every 12 hours
@@ -57,18 +58,21 @@ function run(){
  try{if(err[0]&&!err[0].isNil())error=ObjC.unwrap(err[0].localizedDescription);}catch(e){}
  return JSON.stringify({status:status,body:body,error:error});
 }`;
+// If the macOS helper itself cannot run (not a network error, e.g. a scripting change in a new macOS),
+// stop starting it for every request and use Node's fetch directly.
+let nativeBroken=false;
 function nativeRequest(spec){
   return new Promise((resolve,reject)=>{
     const child=spawn('/usr/bin/osascript',['-l','JavaScript','-e',HTTP_HELPER],{stdio:['pipe','pipe','ignore']});children.add(child);
     let out='';const timer=setTimeout(()=>child.kill('SIGKILL'),((spec.timeout||20)+10)*1000);
     child.stdout.on('data',d=>{out+=d;});
     child.on('error',e=>{clearTimeout(timer);children.delete(child);reject(e);});
-    child.on('close',()=>{clearTimeout(timer);children.delete(child);try{resolve(JSON.parse(out.trim()));}catch{reject(new Error('native http failed'));}});
+    child.on('close',(code,signal)=>{clearTimeout(timer);children.delete(child);try{resolve(JSON.parse(out.trim()));}catch{if(!signal)nativeBroken=true;reject(new Error('native http failed'));}});
     child.stdin.on('error',()=>{});child.stdin.end(JSON.stringify(spec));
   });
 }
 async function request(url,{headers={},method='GET',body=null,timeout=20}={}){
-  if(process.platform==='darwin'){
+  if(process.platform==='darwin' && !nativeBroken){
     try{const r=await nativeRequest({url,headers,method,body,timeout});if(r.status)return r;}catch{}
   }
   try{const r=await fetch(url,{method,headers,body,signal:AbortSignal.timeout(timeout*1000)});return {status:r.status,body:await r.text(),error:null};}
@@ -330,9 +334,14 @@ function readTheme(dataDir){try{return fs.readFileSync(path.join(dataDir,'theme.
 function readSessionKey(dataDir){try{const v=fs.readFileSync(sessionKeyFile(dataDir),'utf8').trim();return /^sk-ant-[\w-]{20,}$/.test(v)?v:null;}catch{return null;}}
 
 /* ---------- Tibo (Codex lead at OpenAI) reset announcements ---------- */
+// Order matters: the first source that returns real, recent Tibo originals wins.
+// FxTwitter answers with Tibo's latest posts but randomly fails about half the time, so it is retried a few times.
+// The X timeline widget is often rate limited and can return posts that are months old, so old results do not count.
 const TIBO_SOURCES=[
-  {type:'rss',name:'X 镜像 · kareem',url:'https://nitter.kareem.one/thsottiaux/rss'},
-  {type:'syndication',name:'X',url:'https://syndication.twitter.com/srv/timeline-profile/screen-name/thsottiaux'},
+  {type:'fxtwitter',name:'FxTwitter',url:'https://api.fxtwitter.com/2/profile/thsottiaux/statuses',attempts:4},
+  {type:'fxtwitter',name:'FixupX',url:'https://api.fixupx.com/2/profile/thsottiaux/statuses',attempts:2},
+  {type:'rss',name:'X 镜像 · kareem',url:'https://nitter.kareem.one/thsottiaux/rss',attempts:1},
+  {type:'syndication',name:'X',url:'https://syndication.twitter.com/srv/timeline-profile/screen-name/thsottiaux',attempts:1,maxAge:14*DAY},
 ];
 const RESET_RE=/\b(reset|resets|resetting|refresh(?:ed|ing)?|replenish\w*|top(?:ped|ping)? up)\b|重置|刷新/i;
 const LIMIT_RE=/\b(rate[- ]?limits?|usage[- ]?limits?|limits?|usage|quota|codex|tokens?|banked)\b|额度|限额|用量|重置券/i;
@@ -429,18 +438,42 @@ function parseSyndication(html,src){
     else for(const v of Object.values(o))if(v && typeof v==='object')queue.push(v);}
   return out.filter(p=>p.at);
 }
-async function fetchTiboPosts({requestFn=request,sources=TIBO_SOURCES}={}){
+// FxTwitter JSON: {code, results:[{type:'status', id, url, text, created_timestamp, author:{screen_name}, reposted_by, quote}]}.
+// Only the post's own text is used; quoted posts live in a separate field and are ignored.
+function parseFx(body,src){
+  let data;try{data=typeof body==='string'?JSON.parse(body):body;}catch{return [];}
+  const list=Array.isArray(data?.results)?data.results:Array.isArray(data?.statuses)?data.statuses:[];
+  return list.filter(s=>s && typeof s==='object' && !s.reposted_by && s.id && typeof s.text==='string').map(s=>{
+    const author=s.author?.screen_name||null,id=String(s.id);
+    return {id,text:decode(s.text),at:epoch(s.created_timestamp ?? s.created_at),author,
+      url:author?`https://x.com/${author}/status/${id}`:null,kind:'tweet',sourceName:src.name,window:DAY};
+  }).filter(p=>p.text && p.at);
+}
+const pause=ms=>new Promise(r=>setTimeout(r,ms));
+async function fetchTiboPosts({requestFn=request,sources=TIBO_SOURCES,retryDelay=1500,now=NOW}={}){
   const failures=[];
-  const headers={'User-Agent':UA,Accept:'text/html,application/rss+xml,application/xml;q=0.9,*/*;q=0.8','Accept-Language':'en-US,en;q=0.9'};
+  const headers={'User-Agent':UA,Accept:'application/json,application/rss+xml,application/xml;q=0.9,text/html;q=0.8,*/*;q=0.5','Accept-Language':'en-US,en;q=0.9'};
+  let stale=null;
   for(const src of sources){
-    try{const r=await requestFn(src.url,{headers,timeout:12});if(r.status!==200){failures.push(`${src.name}: HTTP ${r.status}`);continue;}
-      const list=src.type==='rss'?parseRss(r.body,src):parseSyndication(r.body,src);
-      const posts=list.filter(trustedTibo);
-      if(posts.length)return {posts,source:src.name,latestPostAt:Math.max(...posts.map(p=>p.at))};
-      failures.push(`${src.name}: 未读到有效原帖`);
-    }catch{failures.push(`${src.name}: 连接失败`);}
+    let why='连接失败';
+    for(let attempt=1;attempt<=(src.attempts||1);attempt++){
+      if(attempt>1 && retryDelay)await pause(retryDelay);
+      try{const r=await requestFn(src.url,{headers,timeout:12});
+        if(r.status!==200){why=`HTTP ${r.status}`;if(r.status===429)break;continue;}
+        const list=src.type==='rss'||src.type==='news'?parseRss(r.body,src):src.type==='fxtwitter'?parseFx(r.body,src):parseSyndication(r.body,src);
+        const posts=list.filter(trustedTibo);
+        if(!posts.length){why='未读到有效原帖';continue;}
+        const latestPostAt=Math.max(...posts.map(p=>p.at));
+        // A source that only has old posts cannot tell us about a reset announced today.
+        if(src.maxAge && now()-latestPostAt>src.maxAge){why='返回的是旧帖子';stale=stale||{posts,source:src.name,latestPostAt};break;}
+        return {posts,source:src.name,latestPostAt,attempts:attempt};
+      }catch{why='连接失败';}
+    }
+    failures.push(`${src.name}: ${why}`);
   }
-  throw new Error(failures.join('；')||'没有可用的原帖来源');
+  const e=new Error(failures.join('；')||'没有可用的原帖来源');
+  if(stale)e.stale=stale;
+  throw e;
 }
 
 /* ---------- views shared by the window and the menu bar ---------- */
@@ -478,12 +511,12 @@ async function startServer(options={}) {
   let tibo=demo?{checkedAt:NOW(),ok:true,source:'X',alert:{id:'demo',text:'We are resetting Codex rate limits for all paid plans in the next hour. Enjoy!',at:NOW()-1800,url:'https://x.com/thsottiaux',sourceName:'X'}}
     :{checkedAt:null,lastSuccessAt:null,latestPostAt:null,ok:null,source:null,alert:null};
   if(demo)latchResetPost(tibo,{...tibo.alert,phase:'upcoming'},state.gpt);
-  if(!demo)try{const cached=JSON.parse(fs.readFileSync(tiboFile,'utf8'));tibo={...tibo,...cached,ok:null};
+  if(!demo)try{const cached=JSON.parse(fs.readFileSync(tiboFile,'utf8'));tibo={...tibo,...cached,ok:null,failStreak:0};
     // Migrate the previous release's current warning, including an acknowledged one.
     if(!Object.hasOwn(cached,'pendingReset'))latchResetPost(tibo,activeTiboAlert(tibo),state.gpt);
     if(!tibo.pendingReset)tibo.alert=activeTiboAlert(tibo);
   }catch{}
-  let tiboBusy=false,tiboLast=0;
+  let tiboBusy=false,tiboNextAt=0;
   const busy=new Set(),last=new Map(),retry=new Map();let stopping=false;
   function writeJSON(file,value){if(demo)return;try{fs.mkdirSync(dataDir,{recursive:true,mode:0o700});
     fs.writeFileSync(file+'.tmp',JSON.stringify(value),{mode:0o600});fs.renameSync(file+'.tmp',file);}catch{}}
@@ -517,18 +550,24 @@ async function startServer(options={}) {
     finally{busy.delete(provider);save();if(provider==='gpt' && tibo.pendingReset){observeWeeklyReset(tibo,state.gpt);writeJSON(tiboFile,tibo);}checkReminders();}
   }
   async function checkTibo(force=false){
-    const n=NOW();if(demo || stopping || tiboBusy || n-tiboLast<(force?60:TIBO_INTERVAL))return;
-    tiboBusy=true;tiboLast=n;
+    const n=NOW();if(demo || stopping || tiboBusy || (!force && n<tiboNextAt))return;
+    // A manual refresh can check again after a minute; the timer waits until the scheduled time.
+    if(force && n<tiboNextAt-TIBO_INTERVAL+60)return;
+    tiboBusy=true;tiboNextAt=n+TIBO_INTERVAL;
     try{const {posts,source,latestPostAt}=await (options.fetchTiboPosts||fetchTiboPosts)();
       const hit=selectTiboPost(posts,NOW());
       const previous=tibo.alert && activeTiboAlert({alert:tibo.alert});
       const latest=hit && (!previous || hit.at>=previous.at)?hit:previous;
-      tibo={...tibo,checkedAt:NOW(),lastSuccessAt:NOW(),latestPostAt,ok:true,source,error:null,
+      tibo={...tibo,checkedAt:NOW(),lastSuccessAt:NOW(),latestPostAt,ok:true,source,error:null,failStreak:0,
         alert:latest?{id:latest.id,text:latest.text.slice(0,400),at:latest.at,url:latest.url,sourceName:latest.sourceName,phase:latest.phase,window:latest.window}:null};
       latchResetPost(tibo,hit,state.gpt);
       observeWeeklyReset(tibo,state.gpt);
       if(!tibo.pendingReset && ['upcoming','announcement'].includes(tibo.alert?.phase))tibo.alert=null;
-    }catch(e){tibo={...tibo,checkedAt:NOW(),ok:false,error:e.message,alert:activeTiboAlert(tibo)};}
+    }catch(e){
+      // Try again soon (2, 4, 8 … minutes, at most every 10 minutes) instead of waiting a full interval.
+      const failStreak=(tibo.failStreak||0)+1;
+      tiboNextAt=NOW()+Math.min(TIBO_INTERVAL,TIBO_RETRY*2**(failStreak-1));
+      tibo={...tibo,checkedAt:NOW(),ok:false,error:e.message,failStreak,alert:activeTiboAlert(tibo)};}
     finally{tiboBusy=false;writeJSON(tiboFile,tibo);checkReminders();}
   }
   function refresh(force=false){checkTibo(force);return Promise.allSettled(['gpt','claude'].map(p=>update(p,force)));}
@@ -551,7 +590,9 @@ async function startServer(options={}) {
     return {state:{gpt:brief('gpt'),claude:brief('claude')},alerts:marks};
   }
   const key=crypto.randomBytes(24).toString('hex');const prefix='/'+key+'/';
-  const html=fs.readFileSync(path.join(__dirname,'index.html'));
+  // Read the page files once at start. If the app is later moved, replaced or deleted while running,
+  // the window still loads instead of showing an empty, see-through panel.
+  const page=Object.fromEntries(['index.html','ui.js','style.css'].map(f=>[f,fs.readFileSync(path.join(__dirname,f))]));
   let requestedAction=null;const nativeStatus={visible:null,compact:null,events:[]};
   function readBody(req){return new Promise((resolve,reject)=>{let size=0,chunks=[];
     req.on('data',c=>{size+=c.length;if(size>4096){reject(new Error('too large'));req.destroy();}else chunks.push(c);});
@@ -568,7 +609,7 @@ async function startServer(options={}) {
     function json(value){res.setHeader('Content-Type','application/json');res.end(JSON.stringify(value));}
     if(req.method==='GET' && route==='state'){json({gpt:view('gpt'),claude:view('claude'),demo,refreshing:[...busy],serverTime:NOW(),nativeStatus,
       alerts:alerts(),tibo:{checkedAt:tibo.checkedAt,lastSuccessAt:tibo.lastSuccessAt,latestPostAt:tibo.latestPostAt,
-        ok:tibo.ok,source:tibo.source,error:tibo.error,checking:tiboBusy},hasSessionKey:!!readSessionKey(dataDir),theme:readTheme(dataDir),version:VERSION});return;}
+        ok:tibo.ok,source:tibo.source,error:tibo.error,failStreak:tibo.failStreak||0,nextCheckAt:tiboNextAt||null,checking:tiboBusy},hasSessionKey:!!readSessionKey(dataDir),theme:readTheme(dataDir),version:VERSION});return;}
     if(req.method==='POST' && /^host\/(show|hide|compact|expand)\/[01]$/.test(route)){const parts=route.split('/');nativeStatus.visible=parts[2]==='1';if(parts[1]==='compact' || parts[1]==='expand')nativeStatus.compact=parts[1]==='compact';nativeStatus.events.push({action:parts[1],visible:nativeStatus.visible,at:NOW()});nativeStatus.events=nativeStatus.events.slice(-20);json({ok:true});return;}
     if(req.method==='POST' && route==='refresh'){refresh(true);json({ok:true});return;}
     if(req.method==='POST' && /^tibo\/dismiss\/[\w:.-]{1,80}$/.test(route)){const id=route.split('/')[2];
@@ -588,8 +629,8 @@ async function startServer(options={}) {
     }
     if(req.method==='GET' && route==='native'){const action=requestedAction;requestedAction=null;
       json({action,...nativeBrief(),notifications:options.onNotify?[]:notifications.splice(0)});return;}
-    const allowed={'': ['text/html',html],'ui.js':['text/javascript',null],'style.css':['text/css',null]};
-    if(req.method==='GET' && Object.hasOwn(allowed,route)) {const [mime,data]=allowed[route];res.setHeader('Content-Type',mime);res.end(data || fs.readFileSync(path.join(__dirname,route)));return;}
+    const allowed={'': ['text/html; charset=utf-8','index.html'],'ui.js':['text/javascript; charset=utf-8','ui.js'],'style.css':['text/css; charset=utf-8','style.css']};
+    if(req.method==='GET' && Object.hasOwn(allowed,route)) {const [mime,file]=allowed[route];res.setHeader('Content-Type',mime);res.end(page[file]);return;}
     res.writeHead(404);res.end();
   });
   await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(options.port || 0,'127.0.0.1',resolve);});
@@ -618,7 +659,7 @@ function friendlyCodexError(error){const s=String(error.message || '');
   if(['未找到','无法启动','查询超时','连接已','进程已'].some(t=>s.includes(t)))return s;
   return 'Codex 用量查询失败。请检查网络和登录状态，并确认使用的是订阅账户。';
 }
-module.exports={percent,epoch,duration,normalizeCodex,normalizeClaude,extractToken,extractOAuth,RPC,fetchCodex,fetchClaude,startServer,demoState,
+module.exports={parseFx,percent,epoch,duration,normalizeCodex,normalizeClaude,extractToken,extractOAuth,RPC,fetchCodex,fetchClaude,startServer,demoState,
   summarize,expiringCredits,parseRss,parseSyndication,isResetPost,resetPhase,selectTiboPost,activeTiboAlert,tiboMessage,fetchTiboPosts,
   weeklyObservation,weeklyWasReset,observeWeeklyReset,latchResetPost,decryptCookie,claudeCredits};
 // Watchdog for the menu bar app. The app rewrites beatFile every 3 s. If it stops for 60 s while this Mac is awake,

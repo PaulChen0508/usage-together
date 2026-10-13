@@ -74,10 +74,15 @@ async function loadOnce(){try{const r=await timed('state');if(!r.ok)throw Error(
  $('refresh').disabled=state.refreshing.length>0;
  $('status').textContent=state.refreshing.length?'同步中…':'每 5 分钟更新';document.querySelector('header .mark').title=$('status').textContent;
  const t=s.tibo||{},el=$('tibo');
- el.textContent=t.checking?'Tibo 原帖检查中…':t.ok===false?'Tibo 原帖读不到 · 自动重试':t.ok===true?`Tibo 原帖 ${short(t.lastSuccessAt||t.checkedAt).slice(6)} 已查`:'Tibo 原帖待检查';
- el.classList.toggle('bad',t.ok===false);
- el.title=t.ok===false?`未能读取 Tibo 原帖，无法确认是否有新重置消息。${t.lastSuccessAt?'上次成功：'+short(t.lastSuccessAt)+'。':''}${t.error||''}`:
-  `${t.source?'来源：'+t.source+'。':''}${t.latestPostAt?'最新原帖：'+short(t.latestPostAt)+'。':''}每 10 分钟检查；来源可能有缓存延迟。`;
+ // One failed check is common (the public sources are flaky) and is retried within minutes, so it is only
+ // reported as unreadable after repeated failures or when the last good read is more than 30 minutes old.
+ const recent=t.lastSuccessAt && Date.now()/1000-t.lastSuccessAt<1800, down=t.ok===false && ((t.failStreak||0)>=2 || !recent);
+ const hhmm=v=>short(v).slice(6);
+ el.textContent=t.checking?'Tibo 原帖检查中…':down?'Tibo 原帖暂时读不到 · 自动重试':t.ok===false?`Tibo 原帖 ${hhmm(t.lastSuccessAt)} 已查 · 重试中`:
+  t.ok===true?`Tibo 原帖 ${hhmm(t.lastSuccessAt||t.checkedAt)} 已查`:'Tibo 原帖待检查';
+ el.classList.toggle('bad',!!down);
+ el.title=t.ok===false?`这次没读到 Tibo 原帖，${t.nextCheckAt?hhmm(t.nextCheckAt)+' 左右':'稍后'}自动重试。${t.lastSuccessAt?'上次成功：'+short(t.lastSuccessAt)+'。':''}${t.error||''}`:
+  `${t.source?'来源：'+t.source+'。':''}${t.latestPostAt?'最新原帖：'+short(t.latestPostAt)+'。':''}每 10 分钟检查，失败后几分钟内自动重试；来源可能有缓存延迟。`;
  clocks();fit();
  }catch{$('status').textContent='本地连接中断，正在自动恢复…';
   // Tell the app after a few misses in a row; it restarts the local service or reloads this page.

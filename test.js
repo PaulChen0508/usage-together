@@ -112,3 +112,17 @@ test('native backend writes a fresh status file for the menu bar and removes it 
  assert.equal(fs.existsSync(status),false);assert.equal(fs.existsSync(url),false);
  fs.rmSync(dir,{recursive:true,force:true});
 });
+
+test('page files are served from memory, so a moved or deleted app still shows its window',async()=>{
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'usage-bundle-'));
+ for(const f of ['backend.js','index.html','ui.js','style.css'])fs.copyFileSync(path.join(__dirname,f),path.join(dir,f));
+ const {startServer:start}=require(path.join(dir,'backend.js'));
+ const app=await start({demo:true});
+ try{
+  fs.rmSync(dir,{recursive:true,force:true});
+  for(const [route,type] of [['','text/html'],['ui.js','text/javascript'],['style.css','text/css']]){
+   const r=await fetch(app.url+route);assert.equal(r.status,200,route);assert.match(r.headers.get('content-type'),new RegExp(type));
+   assert.ok((await r.text()).length>100);
+  }
+ }finally{app.stop();}
+});
