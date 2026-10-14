@@ -99,17 +99,29 @@ function recover(){
 }
 // Bring the window to whichever desktop (Space) the user is on now.
 function show(){
-  try{
-    ensureOnScreen();
-    panel.collectionBehavior=SPACE_BEHAVIOR;
-    panel.orderFrontRegardless;
-    try{ panel.makeKeyWindow; }catch(e){}
-    // If the page has been quiet for a while, load it again now; then make sure it really answered.
-    // (Do not call evaluateJavaScript here: a JXA completion handler of null crashes the whole app.)
-    showAt=Date.now();
-    if(Date.now()-lastAlive>8000)reloadPage();
-    controller.performSelectorWithObjectAfterDelay('checkPage:',null,2.5);
-  }catch(e){}
+  // Each step runs on its own, so one failure can no longer stop the window from appearing. Every step is logged.
+  const step=(name,fn)=>{ try{ fn(); }catch(e){ log('show: '+name+' failed: '+e); } };
+  log('show: begin '+windowState());
+  step('unhide',()=>{ const app=$.NSApplication.sharedApplication; if(app.isHidden)app.unhideWithoutActivation; });
+  step('ensureOnScreen',ensureOnScreen);
+  step('collectionBehavior',()=>{ panel.collectionBehavior=SPACE_BEHAVIOR; });
+  step('orderFront',()=>{ panel.orderFrontRegardless; });
+  step('makeKey',()=>{ panel.makeKeyWindow; });
+  // If the page has been quiet for a while, load it again now; then make sure it really answered.
+  // (Do not call evaluateJavaScript here: a JXA completion handler of null crashes the whole app.)
+  showAt=Date.now();
+  step('reload',()=>{ if(Date.now()-lastAlive>8000)reloadPage(); });
+  step('checkLater',()=>{ controller.performSelectorWithObjectAfterDelay('checkPage:',null,2.5); });
+  log('show: end '+windowState());
+}
+// One line describing the window, for the log.
+function windowState(){
+  const get=fn=>{ try{ return fn(); }catch(e){ return 'ERR('+e+')'; } };
+  return 'visible='+get(()=>panel.isVisible)+' occlusion='+get(()=>Number(panel.occlusionState))+
+    ' activeSpace='+get(()=>panel.isOnActiveSpace)+' alpha='+get(()=>Number(panel.alphaValue))+
+    ' level='+get(()=>Number(panel.level))+' appHidden='+get(()=>$.NSApplication.sharedApplication.isHidden)+
+    ' frame='+get(()=>{ const f=panel.frame; return [f.origin.x,f.origin.y,f.size.width,f.size.height].map(Number).join(','); })+
+    ' lastAlive='+(lastAlive?Math.round((Date.now()-lastAlive)/1000)+'s':'never');
 }
 function openLink(url){ if(/^https:\/\/[^\s]+$/.test(url)) $.NSWorkspace.sharedWorkspace.openURL($.NSURL.URLWithString(url)); }
 // System notifications are now shown by the service itself, so the app does not handle them.
@@ -123,6 +135,7 @@ function setTheme(t){
 }
 function perform(name){
   name=String(name||'');
+  if(name!=='alive' && name.indexOf('fit:')!==0 && name.indexOf('theme:')!==0)log('page/menu: '+name);
   if(name==='alive'){lastAlive=Date.now();return;}
   if(name==='stale'){recover();return;}
   if(name.indexOf('theme:')===0){setTheme(name.slice(6));return;}
@@ -132,7 +145,19 @@ function perform(name){
 }
 // Clicks on the menu bar numbers. A transparent view covers the button and receives the mouse-down itself,
 // so the click count comes straight from the event: 1 = menu (after a short wait), 2 = open the window.
-function log(m){}
+// Write a line to ~/Library/Logs/UsageTogether.log (kept under about 200 KB). Logging must never break the app.
+var logPath=null;
+function log(m){
+  try{
+    if(!logPath)logPath=ObjC.unwrap($.NSHomeDirectory())+'/Library/Logs/UsageTogether.log';
+    const fm=$.NSFileManager.defaultManager;
+    if(!fm.fileExistsAtPath(logPath))fm.createFileAtPathContentsAttributes(logPath,$.NSData.data,$());
+    const h=$.NSFileHandle.fileHandleForWritingAtPath(logPath); if(!h || h.isNil())return;
+    if(Number(h.seekToEndOfFile)>200000){ h.truncateFileAtOffset(0); }
+    h.writeData($(new Date().toISOString()+' '+m+'\n').dataUsingEncoding($.NSUTF8StringEncoding));
+    h.closeFile;
+  }catch(e){}
+}
 function handleClick(ev,right){
   // An error here must never escape into AppKit; a failed click just does nothing.
   try{ handleClickInner(ev,right); }catch(e){ pendingMenu=false; }
@@ -284,6 +309,7 @@ ObjC.registerSubclass({name:'UsageTogetherController',superclass:'NSObject',prot
    try{ controller.performSelectorWithObjectAfterDelay('reloadPage:',null,3); }catch(e){} }},
  'reloadPage:':{types:['void',['id']],implementation:function(){ try{ reloadPage(); }catch(e){} }},
  'checkPage:':{types:['void',['id']],implementation:function(){
+   log('checkPage: '+windowState());
    try{ if(!closing && panel.isVisible && lastAlive<showAt)recover(); }catch(e){} }},
  // Menu bar title: one click opens the menu (after waiting to see if a second click comes), double click opens the window.
  'showMenu:':{types:['void',['id']],implementation:function(){ if(!pendingMenu)return; pendingMenu=false; openMenu(); }},
@@ -409,6 +435,7 @@ function run(argv) {
   // Applet idle events keep callbacks inside the scripting runtime.
   controller.tick(null);
   show();
+  log('run finished '+windowState());
   $.NSNotificationCenter.defaultCenter.addObserverSelectorNameObject(controller,'stop:',$.NSApplicationWillTerminateNotification,null);
   return;
 }
