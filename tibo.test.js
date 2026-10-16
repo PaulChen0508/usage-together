@@ -3,7 +3,7 @@ const {test,mock}=require('node:test');
 const assert=require('node:assert/strict');
 const fs=require('node:fs'),path=require('node:path'),os=require('node:os');
 const {parseRss,parseSyndication,resetPhase,selectTiboPost,activeTiboAlert,fetchTiboPosts,startServer,tiboMessage,
- weeklyObservation,weeklyWasReset,observeWeeklyReset,latchResetPost}=require('./backend');
+ weeklyObservation,weeklyWasReset,observeWeeklyReset,latchResetPost,annotateThreads}=require('./backend');
 // Public announcement fixture only; never read a real account or local login cache.
 const xml=`<rss version="2.0" xmlns:dc="http://purl.org/dc/elements/1.1/"><channel>
 <item><title>Global reset by EOD. May the tokens do good things for you.</title><dc:creator>@thsottiaux</dc:creator><description><![CDATA[<p>Global reset by EOD. May the tokens do good things for you.</p>]]></description><pubDate>Sat, 10 Oct 2026 22:16:20 GMT</pubDate><link>https://nitter.kareem.one/thsottiaux/status/2109045392684032299#m</link></item>
@@ -200,4 +200,49 @@ test('a failed check is retried within minutes and only repeated failures are re
   t=await state();assert.equal(t.ok,true);assert.equal(t.failStreak,0);assert.equal(t.source,'FxTwitter');
   time+=5*60*1000;await app.checkTibo();assert.equal(calls,3,'after a success, the normal 10-minute interval applies');
  }finally{app?.stop();mock.restoreAll();if(old)process.env.USAGE_DATA_DIR=old;else delete process.env.USAGE_DATA_DIR;fs.rmSync(dir,{recursive:true,force:true});}
+});
+
+// 2.3.6: the October 15 reset thread. The announcement says "Day 10/ Reset" after another sentence, and the two
+// followups ("Landing within the next 2 hours", "Done and dusted") have no reset word of their own.
+const oct15=JSON.stringify({code:200,results:[
+ {type:'status',id:'2110750421367287996',text:'Day 11/\n\nWe\'ve landed a series of changes and more compute to very significantly decrease the occurrence of the disruptive "Selected model is at capacity. Please try a different model".',
+  author:{screen_name:'thsottiaux'},created_timestamp:1792077090,reposted_by:null,replying_to:null},
+ {type:'status',id:'2110618732666257557',text:'Done and dusted',author:{screen_name:'thsottiaux'},created_timestamp:1792045693,reposted_by:null,replying_to:null,
+  quote:{id:'2110595554036400151',text:'Landing within the next 2 hours',author:{screen_name:'thsottiaux'},created_timestamp:1792040167}},
+ {type:'status',id:'2110595554036400151',text:'Landing within the next 2 hours',author:{screen_name:'thsottiaux'},created_timestamp:1792040167,reposted_by:null,
+  replying_to:{screen_name:'thsottiaux',status:'2110595484180214059'}},
+ {type:'status',id:'2110595484180214059',text:'The reports of my reset button being lost are greatly exaggerated\n\nDay 10/ Reset',
+  author:{screen_name:'thsottiaux'},created_timestamp:1792040151,reposted_by:null,replying_to:null},
+ {type:'status',id:'2109873307722121591',text:'Mashed @poteto on the house.',author:{screen_name:'thsottiaux'},created_timestamp:1791867970,reposted_by:null,
+  replying_to:{screen_name:'thsottiaux',status:'2109873287853707513'}},
+ {type:'status',id:'2109873287853707513',text:"What would you like with your side of reset? It's done.",author:{screen_name:'thsottiaux'},created_timestamp:1791867966,reposted_by:null,
+  quote:{id:'2109812360596865224',text:'Global reset landing by EOD PST time. Enjoy',author:{screen_name:'thsottiaux'},created_timestamp:1791853439}}],cursor:{}});
+test('October 15 reset thread is caught at every step',async()=>{
+ const r=await fetchTiboPosts({sources:[fxSrc],retryDelay:0,requestFn:async()=>({status:200,body:oct15})});
+ const by=id=>r.posts.find(p=>p.id===id);
+ assert.equal(resetPhase(by('2110595484180214059')),'announcement');
+ assert.equal(resetPhase(by('2110595554036400151')),'upcoming');
+ assert.equal(resetPhase(by('2110618732666257557')),'completed');
+ assert.equal(resetPhase(by('2109873287853707513')),'completed');
+ // ordinary replies and unrelated posts in or near the thread stay quiet
+ assert.equal(resetPhase(by('2109873307722121591')),null);
+ assert.equal(resetPhase(by('2110750421367287996')),null);
+ // right after the announcement, the app warns that a reset is coming
+ const early=annotateThreads(parseFx(oct15,fxSrc).filter(p=>p.at<=1792040167));
+ assert.equal(selectTiboPost(early,1792040300).phase,'upcoming');
+ // after "Done and dusted", the newest hit says the reset is done
+ const hit=selectTiboPost(r.posts,1792046000);
+ assert.equal(hit.id,'2110618732666257557');assert.equal(hit.phase,'completed');
+});
+test('a followup only counts inside a recent Tibo reset thread',()=>{
+ const base={author:{screen_name:'thsottiaux'},reposted_by:null};
+ const body=JSON.stringify({code:200,results:[
+  {...base,id:'1',text:'Day 10/ Reset',created_timestamp:1000000},
+  {...base,id:'2',text:'Done and dusted',created_timestamp:1000000+13*3600,quote:{id:'1',text:'Day 10/ Reset',author:{screen_name:'thsottiaux'},created_timestamp:1000000}},
+  {...base,id:'3',text:'Done and dusted',created_timestamp:1000100,quote:{id:'9',text:'We will reset Codex limits tomorrow',author:{screen_name:'other'},created_timestamp:1000000}},
+  {...base,id:'4',text:'Landing within the next 2 hours',created_timestamp:1000100,replying_to:{screen_name:'thsottiaux',status:'8'}}]});
+ const posts=annotateThreads(parseFx(body,fxSrc));
+ assert.equal(resetPhase(posts.find(p=>p.id==='2')),null);
+ assert.equal(resetPhase(posts.find(p=>p.id==='3')),null);
+ assert.equal(resetPhase(posts.find(p=>p.id==='4')),null);
 });

@@ -26,8 +26,8 @@ cat > "$APP_STAGE/Contents/Info.plist" <<'PLIST'
 <key>CFBundleName</key><string>Usage Together</string>
 <key>CFBundleDisplayName</key><string>用量伴侣</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>2.3.5</string>
-<key>CFBundleVersion</key><string>12</string>
+<key>CFBundleShortVersionString</key><string>2.3.6</string>
+<key>CFBundleVersion</key><string>13</string>
 <key>OSAAppletStayOpen</key><true/>
 <key>LSUIElement</key><true/>
 <key>LSMinimumSystemVersion</key><string>13.0</string>

@@ -17,6 +17,8 @@ var VALID_URL = /^http:\/\/127\.0\.0\.1:\d+\/[a-f0-9]{48}\/$/;
 // CanJoinAllSpaces | Stationary | IgnoresCycle | FullScreenAuxiliary:
 // the window is on every desktop and over full-screen apps, so it stays put whatever app or desktop you switch to.
 var SPACE_BEHAVIOR = (1 << 0) | (1 << 4) | (1 << 6) | (1 << 8);
+// MoveToActiveSpace | FullScreenAuxiliary: used for a moment to pull the window onto the desktop the user is on now.
+var MOVE_HERE = (1 << 1) | (1 << 8);
 // Thin native strip at the top of the window that you can drag to move it.
 var STRIP = 12;
 // Everything inside the window is drawn at this scale, so text and numbers shrink in proportion.
@@ -106,6 +108,11 @@ function show(){
   step('ensureOnScreen',ensureOnScreen);
   step('collectionBehavior',()=>{ panel.collectionBehavior=SPACE_BEHAVIOR; });
   step('orderFront',()=>{ panel.orderFrontRegardless; });
+  // macOS sometimes leaves the window on another desktop (most often a full-screen app's desktop) even though it
+  // should be on all of them. It then "opens" where the user cannot see it. Pull it onto the current desktop.
+  step('moveHere',()=>{ if(panel.isOnActiveSpace)return;
+    panel.orderOut(null); panel.collectionBehavior=MOVE_HERE; panel.orderFrontRegardless; panel.collectionBehavior=SPACE_BEHAVIOR;
+    log('show: moved to current desktop, now activeSpace='+panel.isOnActiveSpace); });
   step('makeKey',()=>{ panel.makeKeyWindow; });
   // If the page has been quiet for a while, load it again now; then make sure it really answered.
   // (Do not call evaluateJavaScript here: a JXA completion handler of null crashes the whole app.)
@@ -178,7 +185,7 @@ function handleClickInner(ev,right){
 // was unplugged, or showing a page that never loaded. Double-click then shows it again instead of hiding it.
 function reallyShown(){
   try{
-    if(!panel.isVisible)return false;
+    if(!panel.isVisible || !panel.isOnActiveSpace)return false;
     const occ=Number(panel.occlusionState); if(!(occ & (1<<1)))return false;
     if(Date.now()-lastAlive>15000)return false;
     return true;
@@ -379,7 +386,7 @@ function run(argv) {
   const width=216, height=Math.min(214,Number(screen.size.height)-60);
   panel=$.NSPanel.alloc.initWithContentRectStyleMaskBackingDefer(
     $.NSMakeRect(Number(screen.origin.x)+Number(screen.size.width)-width-16,Number(screen.origin.y)+Number(screen.size.height)-height-8,width,height),
-    $.NSWindowStyleMaskTitled|$.NSWindowStyleMaskClosable|$.NSWindowStyleMaskResizable|(1<<15),$.NSBackingStoreBuffered,false);
+    $.NSWindowStyleMaskTitled|$.NSWindowStyleMaskClosable|$.NSWindowStyleMaskResizable|(1<<7)|(1<<15),$.NSBackingStoreBuffered,false);
   panel.title='用量伴侣';
   panel.releasedWhenClosed=false;
   panel.hidesOnDeactivate=false;
@@ -431,7 +438,7 @@ function run(argv) {
   const catcher=$.UTClickView.alloc.initWithFrame(status.button.bounds);
   catcher.autoresizingMask=$.NSViewWidthSizable|$.NSViewHeightSizable;
   status.button.addSubview(catcher);
-  log('started, double-click window '+clickWindow+'s');
+  log('started v2.3.6, double-click window '+clickWindow+'s');
   // Applet idle events keep callbacks inside the scripting runtime.
   controller.tick(null);
   show();

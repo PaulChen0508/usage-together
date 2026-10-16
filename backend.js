@@ -10,7 +10,7 @@ const {spawn, execFile} = require('node:child_process');
 const {promisify} = require('node:util');
 const exec = promisify(execFile);
 const NOW = () => Date.now() / 1000;
-const VERSION='2.3.5';
+const VERSION='2.3.6';
 const INTERVAL = 300;            // usage refresh, seconds
 const TIBO_INTERVAL = 600;       // Tibo check, seconds
 const TIBO_RETRY = 120;          // first retry after a failed Tibo check, seconds (then doubles, up to TIBO_INTERVAL)
@@ -347,20 +347,52 @@ const RESET_RE=/\b(reset|resets|resetting|refresh(?:ed|ing)?|replenish\w*|top(?:
 const LIMIT_RE=/\b(rate[- ]?limits?|usage[- ]?limits?|limits?|usage|quota|codex|tokens?|banked)\b|额度|限额|用量|重置券/i;
 const trustedTibo=p=>p.kind!=='news' && String(p.author||'').replace(/^@/,'').toLowerCase()==='thsottiaux'
   && /^https:\/\/x\.com\/thsottiaux\/status\/\d+$/.test(p.url||'');
-function resetPhase(p){
+function postPhase(p){
   if(!trustedTibo(p))return null;
   const text=p.text||'';
   if(!RESET_RE.test(text))return null;
   if(/\b(?:no|not|never|won't|will not|cannot|can't)\s+(?:\w+\s+){0,3}resets?\b|\bneeds?\s+(?:a\s+)?reset\b|\b(?:can|could|should|would)\s+(?:we|you|someone)\b.{0,30}\breset\b/i.test(text))return null;
   if(/\breset(?:ting)?\s+(?:the\s+|your\s+|a\s+)?(?:password|context|cache|conversation|branch|repository)\b/i.test(text)
     && !/\b(?:rate|usage)[- ]?limits?\b/i.test(text))return null;
-  if(!LIMIT_RE.test(text) && !/\bglobal\s+reset\b|^Day\s+\d+\s*\/\s*Reset[.!]?$/i.test(text))return null;
+  if(!LIMIT_RE.test(text) && !/\bglobal\s+reset\b|\bDay\s+\d+\s*\/\s*Reset\b/i.test(text))return null;
   if(/\bbanked\b|\b(?:free|bonus|extra)\s+(?:rate limit\s+)?reset\b|\breset\s+credits?\b|重置券/i.test(text))return 'banked';
   if(/\b(?:have|has|had|already|just)\s+(?:been\s+)?reset\b|\breset\b.{0,30}\b(?:processed|complete[ds]?|done|landed)\b|已(?:经)?重置/i.test(text))return 'completed';
   if(/\b(?:will|going to|about to|resetting|tomorrow|next|upcoming)\b|\bby\s+(?:EOD|end of|tonight)\b|即将|将会/i.test(text))return 'upcoming';
   return 'announcement';
 }
+function resetPhase(p){
+  const own=postPhase(p);
+  return own!==null || !trustedTibo(p)?own:(p.threadPhase||null);
+}
 const isResetPost=p=>resetPhase(p)!==null;
+// Tibo often announces a reset in one post, then follows up in a reply or quote with no reset word at all
+// ("Landing within the next 2 hours", "Done and dusted"). Such a short followup counts only when it replies to
+// or quotes one of his own recent reset posts, and its own words say the reset is coming or done.
+const THREAD_WINDOW=12*HOUR;
+const FOLLOW_DONE=/\b(?:done|dusted|landed|propagated|complete[ds]?|finished|in the bag|rolled out|all set)\b/i;
+const FOLLOW_SOON=/\b(?:landing|within|next\s+(?:\d+\s+)?(?:hours?|minutes?|mins?)|soon|shortly|later today|tonight|by\s+(?:EOD|end of)|in\s+\d+\s+(?:hours?|minutes?|mins?))\b/i;
+function annotateThreads(posts){
+  const phase=new Map(),at=new Map();
+  for(const p of [...posts].sort((a,b)=>a.at-b.at)){
+    delete p.threadPhase;
+    const parents=[];
+    if(p.replyTo)parents.push({id:p.replyTo});
+    if(p.quote)parents.push(p.quote);
+    let inherited=null;
+    for(const q of parents){
+      const qAt=at.get(q.id)??q.at,qPhase=phase.has(q.id)?phase.get(q.id)
+        :(q.author && q.text?postPhase({...q,kind:'tweet',url:`https://x.com/${q.author}/status/${q.id}`}):null);
+      if(qPhase && Number.isFinite(qAt) && p.at>=qAt && p.at-qAt<=THREAD_WINDOW){inherited=qPhase;break;}
+    }
+    if(inherited && postPhase(p)===null){
+      const text=p.text||'';
+      p.threadPhase=FOLLOW_DONE.test(text)?'completed':FOLLOW_SOON.test(text)?'upcoming':null;
+      if(!p.threadPhase)delete p.threadPhase;
+    }
+    phase.set(p.id,resetPhase(p));at.set(p.id,p.at);
+  }
+  return posts;
+}
 function tiboMessage(a){
   const title={upcoming:'Tibo：额度即将重置',completed:'Tibo：额度已重置',banked:'Tibo：重置券消息',announcement:'Tibo：额度重置消息'}[a.phase]||'Tibo：额度重置消息';
   return {title,body:`${a.phase==='upcoming'?'可在重置前使用剩余额度。':''}「${a.text.slice(0,180)}」`};
@@ -434,7 +466,9 @@ function parseSyndication(html,src){
   const out=[],queue=[data];
   for(let i=0;i<queue.length && i<20000;i++){const o=queue[i];if(!o || typeof o!=='object')continue;
     if(o.id_str && (o.full_text || o.text) && o.created_at)out.push({id:o.id_str,text:decode(o.full_text||o.text),at:epoch(o.created_at),
-      author:o.user?.screen_name||null,url:`https://x.com/${o.user?.screen_name||'unknown'}/status/${o.id_str}`,kind:'tweet',sourceName:src.name,window:DAY});
+      author:o.user?.screen_name||null,url:`https://x.com/${o.user?.screen_name||'unknown'}/status/${o.id_str}`,kind:'tweet',sourceName:src.name,window:DAY,
+      ...(o.in_reply_to_status_id_str && o.in_reply_to_screen_name===o.user?.screen_name?{replyTo:o.in_reply_to_status_id_str}:{}),
+      ...(o.quoted_status_id_str?{quote:{id:o.quoted_status_id_str}}:{})});
     else for(const v of Object.values(o))if(v && typeof v==='object')queue.push(v);}
   return out.filter(p=>p.at);
 }
@@ -445,8 +479,11 @@ function parseFx(body,src){
   const list=Array.isArray(data?.results)?data.results:Array.isArray(data?.statuses)?data.statuses:[];
   return list.filter(s=>s && typeof s==='object' && !s.reposted_by && s.id && typeof s.text==='string').map(s=>{
     const author=s.author?.screen_name||null,id=String(s.id);
+    const replyTo=s.replying_to?.status && String(s.replying_to.screen_name||'').toLowerCase()===String(author||'').toLowerCase()?String(s.replying_to.status):null;
+    const q=s.quote,quote=q && q.id && q.author?.screen_name?{id:String(q.id),author:q.author.screen_name,text:decode(q.text),at:epoch(q.created_timestamp ?? q.created_at)}:null;
     return {id,text:decode(s.text),at:epoch(s.created_timestamp ?? s.created_at),author,
-      url:author?`https://x.com/${author}/status/${id}`:null,kind:'tweet',sourceName:src.name,window:DAY};
+      url:author?`https://x.com/${author}/status/${id}`:null,kind:'tweet',sourceName:src.name,window:DAY,
+      ...(replyTo?{replyTo}:{}),...(quote?{quote}:{})};
   }).filter(p=>p.text && p.at);
 }
 const pause=ms=>new Promise(r=>setTimeout(r,ms));
@@ -461,7 +498,7 @@ async function fetchTiboPosts({requestFn=request,sources=TIBO_SOURCES,retryDelay
       try{const r=await requestFn(src.url,{headers,timeout:12});
         if(r.status!==200){why=`HTTP ${r.status}`;if(r.status===429)break;continue;}
         const list=src.type==='rss'||src.type==='news'?parseRss(r.body,src):src.type==='fxtwitter'?parseFx(r.body,src):parseSyndication(r.body,src);
-        const posts=list.filter(trustedTibo);
+        const posts=annotateThreads(list.filter(trustedTibo));
         if(!posts.length){why='未读到有效原帖';continue;}
         const latestPostAt=Math.max(...posts.map(p=>p.at));
         // A source that only has old posts cannot tell us about a reset announced today.
@@ -660,7 +697,7 @@ function friendlyCodexError(error){const s=String(error.message || '');
   return 'Codex 用量查询失败。请检查网络和登录状态，并确认使用的是订阅账户。';
 }
 module.exports={parseFx,percent,epoch,duration,normalizeCodex,normalizeClaude,extractToken,extractOAuth,RPC,fetchCodex,fetchClaude,startServer,demoState,
-  summarize,expiringCredits,parseRss,parseSyndication,isResetPost,resetPhase,selectTiboPost,activeTiboAlert,tiboMessage,fetchTiboPosts,
+  summarize,expiringCredits,parseRss,parseSyndication,isResetPost,resetPhase,annotateThreads,selectTiboPost,activeTiboAlert,tiboMessage,fetchTiboPosts,
   weeklyObservation,weeklyWasReset,observeWeeklyReset,latchResetPost,decryptCookie,claudeCredits};
 // Watchdog for the menu bar app. The app rewrites beatFile every 3 s. If it stops for 60 s while this Mac is awake,
 // the app's main thread is frozen (no clicks, no window). Then force-quit it and open a fresh copy, so the user
