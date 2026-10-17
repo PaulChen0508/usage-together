@@ -14,11 +14,12 @@ var TICK = 3;
 var urlFile = null, statusFile = null, beatFile = null, starting = 0, nextStartAt = 0, startFailures = 0;
 var lastTickAt = 0, graceUntil = 0, lastStatusAt = 0, menuOpen = false, helpers = [];
 var VALID_URL = /^http:\/\/127\.0\.0\.1:\d+\/[a-f0-9]{48}\/$/;
-// CanJoinAllSpaces | Stationary | IgnoresCycle | FullScreenAuxiliary:
+// CanJoinAllSpaces | IgnoresCycle | FullScreenAuxiliary (no Stationary):
 // the window is on every desktop and over full-screen apps, so it stays put whatever app or desktop you switch to.
-var SPACE_BEHAVIOR = (1 << 0) | (1 << 4) | (1 << 6) | (1 << 8);
+var SPACE_BEHAVIOR = (1 << 0) | (1 << 6) | (1 << 8);
 // MoveToActiveSpace | FullScreenAuxiliary: used for a moment to pull the window onto the desktop the user is on now.
-var MOVE_HERE = (1 << 1) | (1 << 8);
+var MOVE_HERE = (1 << 1) | (1 << 6) | (1 << 8);
+var wantsWindow = false, showGeneration = 0, showAttempt = 0;
 // Thin native strip at the top of the window that you can drag to move it.
 var STRIP = 12;
 // Everything inside the window is drawn at this scale, so text and numbers shrink in proportion.
@@ -99,27 +100,57 @@ function recover(){
   if(starting)return;
   if(!task || !task.running || now-lastStatusAt>20000)restartService(); else reloadPage();
 }
-// Bring the window to whichever desktop (Space) the user is on now.
+// WindowServer applies Space changes asynchronously. Verify them after ordering.
+function scheduleWindowCheck(selector, delay){
+  controller.performSelectorWithObjectAfterDelay(selector,$(String(showGeneration)),delay);
+}
+function currentShow(token){return wantsWindow && !closing && String(ObjC.unwrap(token))===String(showGeneration);}
 function show(){
-  // Each step runs on its own, so one failure can no longer stop the window from appearing. Every step is logged.
-  const step=(name,fn)=>{ try{ fn(); }catch(e){ log('show: '+name+' failed: '+e); } };
+  wantsWindow=true; showGeneration++; showAttempt=0;
   log('show: begin '+windowState());
-  step('unhide',()=>{ const app=$.NSApplication.sharedApplication; if(app.isHidden)app.unhideWithoutActivation; });
-  step('ensureOnScreen',ensureOnScreen);
-  step('collectionBehavior',()=>{ panel.collectionBehavior=SPACE_BEHAVIOR; });
-  step('orderFront',()=>{ panel.orderFrontRegardless; });
-  // macOS sometimes leaves the window on another desktop (most often a full-screen app's desktop) even though it
-  // should be on all of them. It then "opens" where the user cannot see it. Pull it onto the current desktop.
-  step('moveHere',()=>{ if(panel.isOnActiveSpace)return;
-    panel.orderOut(null); panel.collectionBehavior=MOVE_HERE; panel.orderFrontRegardless; panel.collectionBehavior=SPACE_BEHAVIOR;
-    log('show: moved to current desktop, now activeSpace='+panel.isOnActiveSpace); });
-  step('makeKey',()=>{ panel.makeKeyWindow; });
-  // If the page has been quiet for a while, load it again now; then make sure it really answered.
-  // (Do not call evaluateJavaScript here: a JXA completion handler of null crashes the whole app.)
+  try{
+    const app=$.NSApplication.sharedApplication;
+    if(app.isHidden)app.unhideWithoutActivation;
+    ensureOnScreen();
+    panel.orderOut(null);
+    panel.collectionBehavior=0;
+    panel.collectionBehavior=SPACE_BEHAVIOR;
+    panel.orderFrontRegardless;
+    panel.makeKeyWindow;
+    scheduleWindowCheck('verifyShow:',0.4);
+  }catch(e){log('show failed: '+e);}
   showAt=Date.now();
-  step('reload',()=>{ if(Date.now()-lastAlive>8000)reloadPage(); });
-  step('checkLater',()=>{ controller.performSelectorWithObjectAfterDelay('checkPage:',null,2.5); });
-  log('show: end '+windowState());
+  if(Date.now()-lastAlive>8000)reloadPage();
+  controller.performSelectorWithObjectAfterDelay('checkPage:',null,2.5);
+  log('show: ordered '+windowState());
+}
+function hide(){
+  wantsWindow=false; showGeneration++;
+  panel.orderOut(null);
+}
+function verifyShow(token){
+  if(!currentShow(token))return;
+  log('verifyShow attempt='+showAttempt+' '+windowState());
+  if(panel.isVisible && panel.isOnActiveSpace)return;
+  if(showAttempt===0){
+    showAttempt=1;
+    log('rebuilding stranded window');
+    createPanel();
+    ensureOnScreen(); panel.orderFrontRegardless; panel.makeKeyWindow;
+    scheduleWindowCheck('verifyShow:',0.4);
+  }else if(showAttempt===1){
+    showAttempt=2;
+    panel.orderOut(null); panel.collectionBehavior=MOVE_HERE;
+    $.NSApplication.sharedApplication.activateIgnoringOtherApps(true);
+    panel.makeKeyAndOrderFront(null);
+    scheduleWindowCheck('finishWindowMove:',0.4);
+  }else{log('window recovery exhausted '+windowState());}
+}
+function finishWindowMove(token){
+  if(!currentShow(token))return;
+  panel.collectionBehavior=SPACE_BEHAVIOR;
+  panel.orderFrontRegardless;
+  scheduleWindowCheck('verifyShow:',0.4);
 }
 // One line describing the window, for the log.
 function windowState(){
@@ -148,7 +179,7 @@ function perform(name){
   if(name.indexOf('theme:')===0){setTheme(name.slice(6));return;}
   if(name.indexOf('fit:')===0){fit(Number(name.slice(4)));return;}
   if(name.indexOf('open:')===0){openLink(name.slice(5));return;}
-  switch(name){case 'hide':panel.orderOut(null);return;case 'show':show();return;case 'quit':quit();return;default:return;}
+  switch(name){case 'hide':hide();return;case 'show':show();return;case 'quit':quit();return;default:return;}
 }
 // Clicks on the menu bar numbers. A transparent view covers the button and receives the mouse-down itself,
 // so the click count comes straight from the event: 1 = menu (after a short wait), 2 = open the window.
@@ -174,7 +205,8 @@ function handleClickInner(ev,right){
   const now=Date.now();
   log('click count='+count+' right='+right+' pending='+pendingMenu+' gap='+(now-lastClick));
   if(right){pendingMenu=false;openMenu();return;}
-  if(count>=2 || (pendingMenu && now-lastClick<=clickWindow*1000+80)){pendingMenu=false;lastClick=0;
+  if(count>2){pendingMenu=false;return;}
+  if(count===2 || (pendingMenu && now-lastClick<=clickWindow*1000+80)){pendingMenu=false;lastClick=0;
     // double click toggles: open the window, or put it away if it is already showing
     if(reallyShown())perform('hide'); else show();
     return;}
@@ -315,6 +347,8 @@ ObjC.registerSubclass({name:'UsageTogetherController',superclass:'NSObject',prot
  'webView:didFailProvisionalNavigation:withError:':{types:['void',['id','id','id']],implementation:function(){
    try{ controller.performSelectorWithObjectAfterDelay('reloadPage:',null,3); }catch(e){} }},
  'reloadPage:':{types:['void',['id']],implementation:function(){ try{ reloadPage(); }catch(e){} }},
+ 'verifyShow:':{types:['void',['id']],implementation:function(token){try{verifyShow(token);}catch(e){log('verifyShow failed: '+e);}}},
+ 'finishWindowMove:':{types:['void',['id']],implementation:function(token){try{finishWindowMove(token);}catch(e){log('finishWindowMove failed: '+e);}}},
  'checkPage:':{types:['void',['id']],implementation:function(){
    log('checkPage: '+windowState());
    try{ if(!closing && panel.isVisible && lastAlive<showAt)recover(); }catch(e){} }},
@@ -366,21 +400,11 @@ ObjC.registerSubclass({name:'UsageTogetherController',superclass:'NSObject',prot
    }catch(e){}
  }}
 }});
-function run(argv) {
-  if(panel && task && task.running){show();return;}
-  if(argv[0] && /^http:/.test(argv[0]))baseURL=argv[0];
-  else {
-    resourcesPath=argv[0]==='--resources'?argv[1]:ObjC.unwrap($.NSBundle.mainBundle.resourcePath);
-    closeOtherCopies();
-    startService();
-  }
-  if(!VALID_URL.test(baseURL))throw new Error('Invalid local service');
-  const app=$.NSApplication.sharedApplication;
-  app.setActivationPolicy($.NSApplicationActivationPolicyAccessory);
-  // Keep macOS from putting the app to sleep (App Nap) while it sits in the menu bar, which made it slow to respond
-  // after a while. The Mac itself can still sleep normally.
-  try{ activity=$.NSProcessInfo.processInfo.beginActivityWithOptionsReason(0x00EFFFFF,'用量伴侣在菜单栏显示额度'); }catch(e){}
-  controller=$.UsageTogetherController.alloc.init;
+function createPanel(){
+  const previous=panel, savedTheme=theme||'dark';
+  const savedFrame=previous?previous.frame:null;
+  if(web)web.removeFromSuperview;
+  if(previous){previous.delegate=null;previous.orderOut(null);previous.releasedWhenClosed=true;previous.close;}
   const primary=$.NSScreen.mainScreen;
   const screen=primary && !primary.isNil() ? primary.visibleFrame : $.NSMakeRect(0,0,1440,900);
   const width=216, height=Math.min(214,Number(screen.size.height)-60);
@@ -406,10 +430,13 @@ function run(argv) {
   panel.delegate=controller;
   panel.setFrameAutosaveName('UsageTogetherWindow24');
   // Fixed dark see-through tint (no live blur), so the look never changes when switching apps or desktops.
-  setTheme('dark');
+  theme=''; setTheme(savedTheme);
+  if(savedFrame)panel.setFrameDisplay(savedFrame,false);
+  lastFit=0;
   const glass=$.NSView.alloc.initWithFrame($.NSMakeRect(0,0,width,height));
   glass.autoresizingMask=$.NSViewWidthSizable|$.NSViewHeightSizable;
   panel.contentView=glass;
+  if(!web){
   const config=$.WKWebViewConfiguration.alloc.init;
   config.websiteDataStore=$.WKWebsiteDataStore.nonPersistentDataStore;
   config.userContentController.addScriptMessageHandlerName(controller,'usageTogether');
@@ -419,11 +446,29 @@ function run(argv) {
   try{ web.underPageBackgroundColor=$.NSColor.clearColor; }catch(e){}
   web.navigationDelegate=controller;
   reloadPage();
+  }
   glass.addSubview(web);
   // Size the page from the window's real size (it may have been restored from last time), so nothing is cut off.
   const b=glass.bounds;
   web.frame=$.NSMakeRect(0,0,Number(b.size.width),Math.max(40,Number(b.size.height)-STRIP));
   try{ if(web.respondsToSelector('setPageZoom:')) web.pageZoom=ZOOM; else ZOOM=1; }catch(e){ ZOOM=1; }
+}
+function run(argv) {
+  if(panel && task && task.running){show();return;}
+  if(argv[0] && /^http:/.test(argv[0]))baseURL=argv[0];
+  else {
+    resourcesPath=argv[0]==='--resources'?argv[1]:ObjC.unwrap($.NSBundle.mainBundle.resourcePath);
+    closeOtherCopies();
+    startService();
+  }
+  if(!VALID_URL.test(baseURL))throw new Error('Invalid local service');
+  const app=$.NSApplication.sharedApplication;
+  app.setActivationPolicy($.NSApplicationActivationPolicyAccessory);
+  // Keep macOS from putting the app to sleep (App Nap) while it sits in the menu bar, which made it slow to respond
+  // after a while. The Mac itself can still sleep normally.
+  try{ activity=$.NSProcessInfo.processInfo.beginActivityWithOptionsReason(0x00EFFFFF,'用量伴侣在菜单栏显示额度'); }catch(e){}
+  controller=$.UsageTogetherController.alloc.init;
+  createPanel();
   status=$.NSStatusBar.systemStatusBar.statusItemWithLength($.NSVariableStatusItemLength);
   try{ status.button.font=$.NSFont.monospacedDigitSystemFontOfSizeWeight(14,0.3); }catch(e){}
   status.button.title='G— C—';
@@ -438,7 +483,7 @@ function run(argv) {
   const catcher=$.UTClickView.alloc.initWithFrame(status.button.bounds);
   catcher.autoresizingMask=$.NSViewWidthSizable|$.NSViewHeightSizable;
   status.button.addSubview(catcher);
-  log('started v2.3.6, double-click window '+clickWindow+'s');
+  log('started v2.3.7, double-click window '+clickWindow+'s');
   // Applet idle events keep callbacks inside the scripting runtime.
   controller.tick(null);
   show();

@@ -10,7 +10,7 @@ const {spawn, execFile} = require('node:child_process');
 const {promisify} = require('node:util');
 const exec = promisify(execFile);
 const NOW = () => Date.now() / 1000;
-const VERSION='2.3.6';
+const VERSION='2.3.7';
 const INTERVAL = 300;            // usage refresh, seconds
 const TIBO_INTERVAL = 600;       // Tibo check, seconds
 const TIBO_RETRY = 120;          // first retry after a failed Tibo check, seconds (then doubles, up to TIBO_INTERVAL)
